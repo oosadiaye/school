@@ -1,0 +1,40 @@
+# Local development services — PostgreSQL + Redis
+# Start: docker compose -f docker-compose.dev.yml up -d
+# Stop:  docker compose -f docker-compose.dev.yml down
+
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: tims_postgres_dev
+    environment:
+      POSTGRES_DB: school
+      POSTGRES_USER: school
+      POSTGRES_PASSWORD: school
+    ports:
+      - "5432:5432"
+    volumes:
+      - tims_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U school -d school"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: tims_redis_dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - tims_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  tims_postgres_data:
+  tims_redis_data:
