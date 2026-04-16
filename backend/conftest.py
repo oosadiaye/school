@@ -9,13 +9,23 @@ User = get_user_model()
 
 @pytest.fixture
 def api_client():
-    """Unauthenticated DRF APIClient."""
+    """Unauthenticated DRF APIClient. Does not touch the database.
+
+    Add the `db` marker or use a user-creating fixture if your test needs
+    DB access.
+    """
     return APIClient()
 
 
 @pytest.fixture
 def admin_user(db):
-    """Create an admin user for tests."""
+    """Create a superuser with user_type='admin' for tests.
+
+    Note: create_superuser sets is_superuser=True, which bypasses all Django
+    permission checks. Tests that specifically need to verify admin-role
+    permission logic (without superuser bypass) should create a regular user
+    with user_type='admin' instead.
+    """
     return User.objects.create_superuser(
         username='admin_test',
         email='admin@test.local',
