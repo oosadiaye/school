@@ -113,27 +113,28 @@ const Library = () => {
                 </tr>
               </thead>
               <tbody>
-                <tr>
-                  <td style={{ fontWeight: '600', color: '#fff' }}>Introduction to Computer Science</td>
-                  <td>John Smith</td>
-                  <td>978-0-123456-78-9</td>
-                  <td>Textbook</td>
-                  <td>5</td>
-                  <td>A-101</td>
-                </tr>
-                <tr>
-                  <td style={{ fontWeight: '600', color: '#fff' }}>Data Structures and Algorithms</td>
-                  <td>Jane Doe</td>
-                  <td>978-0-987654-32-1</td>
-                  <td>Textbook</td>
-                  <td>3</td>
-                  <td>A-102</td>
-                </tr>
+                {books.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="no-data" style={{ textAlign: 'center', padding: '2rem' }}>
+                      No books found. Click "Add Book" to create the first one.
+                    </td>
+                  </tr>
+                ) : (
+                  books.map((book) => (
+                    <tr key={book.id}>
+                      <td style={{ fontWeight: '600', color: '#fff' }}>{book.title}</td>
+                      <td>{book.author_name || book.author || '-'}</td>
+                      <td>{book.isbn || '-'}</td>
+                      <td>{book.category_name || book.category || '-'}</td>
+                      <td>{book.available_copies ?? book.available ?? '-'}</td>
+                      <td>{book.shelf_location || '-'}</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
         )}
-        <p className="no-data" style={{ marginTop: '1.5rem', opacity: 0.6 }}>Library module ready. Connect to backend API for full functionality.</p>
       </div>
     </div>
   );
