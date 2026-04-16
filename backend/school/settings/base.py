@@ -1,17 +1,15 @@
 """
-Django settings for school project.
+Base Django settings for TIMS.
+Shared across all environments. Inherit from here.
 """
-
 from pathlib import Path
 from datetime import timedelta
+from decouple import config, Csv
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-SECRET_KEY = 'django-insecure-aj3qxihg^#2v99fvcml3s(4)dzv66$6xl+c@a6bw947wocg@*t'
-
-DEBUG = True
-
-ALLOWED_HOSTS = ['*']
+# Loaded per-environment, default provided for safety
+SECRET_KEY = config('SECRET_KEY', default='unsafe-default-override-in-env')
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -22,6 +20,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'corsheaders',
+    # Project apps
     'accounts',
     'students',
     'academic',
@@ -65,18 +64,19 @@ WSGI_APPLICATION = 'school.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'school',
-        'USER': 'school',
-        'PASSWORD': 'school',
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'ENGINE': config('DB_ENGINE', default='django.db.backends.postgresql'),
+        'NAME': config('DB_NAME', default='school'),
+        'USER': config('DB_USER', default='school'),
+        'PASSWORD': config('DB_PASSWORD', default='school'),
+        'HOST': config('DB_HOST', default='localhost'),
+        'PORT': config('DB_PORT', default='5432'),
     }
 }
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
-    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+     'OPTIONS': {'min_length': 10}},
     {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
@@ -87,6 +87,7 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
@@ -114,9 +115,37 @@ REST_FRAMEWORK = {
     },
 }
 
+# JWT
 JWT_SECRET_KEY = SECRET_KEY
-JWT_ACCESS_TOKEN_LIFETIME = timedelta(hours=2)
-JWT_REFRESH_TOKEN_LIFETIME = timedelta(days=7)
+JWT_ACCESS_TOKEN_LIFETIME = timedelta(
+    hours=config('JWT_ACCESS_TOKEN_HOURS', default=2, cast=int))
+JWT_REFRESH_TOKEN_LIFETIME = timedelta(
+    days=config('JWT_REFRESH_TOKEN_DAYS', default=7, cast=int))
 
-CORS_ALLOW_ALL_ORIGINS = True
+# CORS — overridden per environment
 CORS_ALLOW_CREDENTIALS = True
+
+# Celery
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://localhost:6379/2')
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://localhost:6379/3')
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE
+
+# Email — defaults for dev, overridden in production
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='no-reply@tims.local')
+
+# Payment gateway keys — loaded even if unused (services module reads them)
+PAYSTACK_PUBLIC_KEY = config('PAYSTACK_PUBLIC_KEY', default='')
+PAYSTACK_SECRET_KEY = config('PAYSTACK_SECRET_KEY', default='')
+FLUTTERWAVE_PUBLIC_KEY = config('FLUTTERWAVE_PUBLIC_KEY', default='')
+FLUTTERWAVE_SECRET_KEY = config('FLUTTERWAVE_SECRET_KEY', default='')
+STRIPE_PUBLIC_KEY = config('STRIPE_PUBLIC_KEY', default='')
+STRIPE_SECRET_KEY = config('STRIPE_SECRET_KEY', default='')
+
+# SMS
+SMS_PROVIDER = config('SMS_PROVIDER', default='termii')
+SMS_API_KEY = config('SMS_API_KEY', default='')
+SMS_SENDER_ID = config('SMS_SENDER_ID', default='TIMS')
