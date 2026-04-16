@@ -1,5 +1,4 @@
 from rest_framework import serializers
-from django.contrib.auth import authenticate
 from .models import User
 
 
@@ -33,17 +32,10 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
 
 class LoginSerializer(serializers.Serializer):
+    """Validates login request fields. Authentication logic lives in AuthService."""
+
     username = serializers.CharField()
     password = serializers.CharField(write_only=True)
-    
-    def validate(self, data):
-        user = authenticate(username=data['username'], password=data['password'])
-        if not user:
-            raise serializers.ValidationError('Invalid credentials')
-        if not user.is_active:
-            raise serializers.ValidationError('User account is disabled')
-        data['user'] = user
-        return data
 
 
 class ChangePasswordSerializer(serializers.Serializer):
