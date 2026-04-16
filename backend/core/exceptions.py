@@ -69,9 +69,11 @@ def _build_error_payload(
     details: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compose the standardized error response body."""
-    payload: Dict[str, Any] = {'error': error_code, 'message': message}
-    if details:
-        payload['details'] = details
+    payload: Dict[str, Any] = {
+        'error': error_code,
+        'message': message,
+        'details': details or {},
+    }
     return payload
 
 

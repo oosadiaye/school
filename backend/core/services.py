@@ -31,7 +31,7 @@ Example:
 
             Raises:
                 ConflictError: if any invoice already exists
-                NotFoundError: if no FeeStructure matches
+                NotFound: if no FeeStructure matches
             '''
             with transaction.atomic():
                 # business logic here
