@@ -24,4 +24,4 @@ except User.DoesNotExist:
 
 user.set_password(admin_password)
 user.save()
-print("Admin password reset to 'admin123'")
+print("Admin password reset successfully.")
