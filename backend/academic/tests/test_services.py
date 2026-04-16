@@ -1,9 +1,13 @@
 """Tests for academic.services — RegistrationService, ResultService,
-SessionService, SemesterService."""
+SessionService, SemesterService, CourseService, AttendanceService,
+ExamSittingService."""
 import pytest
 from academic.exceptions import AlreadyPublished, CourseNotFound, RegistrationClosed
-from academic.models import AcademicSession, CourseRegistration, Result
+from academic.models import AcademicSession, Attendance, CourseRegistration, ExamSitting, Result
 from academic.services import (
+    AttendanceService,
+    CourseService,
+    ExamSittingService,
     RegistrationService,
     ResultService,
     SemesterService,
@@ -11,9 +15,11 @@ from academic.services import (
 )
 from academic.tests.factories import (
     AcademicSessionFactory,
+    AttendanceFactory,
     CourseAllocationFactory,
     CourseFactory,
     CourseRegistrationFactory,
+    ExamSittingFactory,
     ResultFactory,
     SemesterFactory,
 )
@@ -291,3 +297,145 @@ class TestSemesterService:
         SemesterFactory(is_active=False)
 
         assert SemesterService.get_active() is None
+
+
+# ---------------------------------------------------------------------------
+# CourseService tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestCourseService:
+    """Tests for CourseService."""
+
+    def test_safe_delete_course_with_registrations_raises(self):
+        """safe_delete raises ConflictError when course has registrations."""
+        from core.exceptions import ConflictError
+
+        course = CourseFactory()
+        semester = SemesterFactory()
+        CourseRegistrationFactory(course=course, semester=semester)
+
+        with pytest.raises(ConflictError, match='active registrations'):
+            CourseService.safe_delete(course, by=None)
+
+    def test_safe_delete_course_without_registrations_succeeds(self):
+        """Course with no registrations is deleted."""
+        course = CourseFactory()
+        course_id = course.id
+
+        CourseService.safe_delete(course, by=None)
+
+        from academic.models import Course
+        assert not Course.objects.filter(id=course_id).exists()
+
+
+# ---------------------------------------------------------------------------
+# AttendanceService tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestAttendanceService:
+    """Tests for AttendanceService."""
+
+    def test_mark_attendance_creates_record(self):
+        """New attendance creates a record."""
+        student = StudentFactory()
+        course = CourseFactory()
+        semester = SemesterFactory()
+
+        attendance = AttendanceService.mark_attendance(
+            student=student,
+            course=course,
+            semester=semester,
+            total_classes=10,
+            attended_classes=8,
+        )
+
+        assert attendance.pk is not None
+        assert attendance.total_classes == 10
+        assert attendance.attended_classes == 8
+        assert Attendance.objects.filter(student=student, course=course).count() == 1
+
+    def test_mark_attendance_updates_existing(self):
+        """Same student+course+semester updates existing, no duplicate."""
+        student = StudentFactory()
+        course = CourseFactory()
+        semester = SemesterFactory()
+
+        AttendanceFactory(
+            student=student, course=course, semester=semester,
+            total_classes=10, attended_classes=6,
+        )
+
+        updated = AttendanceService.mark_attendance(
+            student=student,
+            course=course,
+            semester=semester,
+            total_classes=12,
+            attended_classes=10,
+        )
+
+        assert updated.total_classes == 12
+        assert updated.attended_classes == 10
+        assert Attendance.objects.filter(student=student, course=course).count() == 1
+
+
+# ---------------------------------------------------------------------------
+# ExamSittingService tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestExamSittingService:
+    """Tests for ExamSittingService.generate_seating_for_course."""
+
+    def test_generate_seating_assigns_sequential_seats(self):
+        """3 registered students get 3 sittings with seats 001, 002, 003."""
+        import datetime
+
+        semester = SemesterFactory()
+        course = CourseFactory()
+        students = [StudentFactory() for _ in range(3)]
+        for s in students:
+            CourseRegistrationFactory(student=s, course=course, semester=semester)
+
+        sittings = ExamSittingService.generate_seating_for_course(
+            course=course,
+            semester=semester,
+            venue='Main Hall',
+            exam_date=datetime.date(2025, 6, 15),
+        )
+
+        assert len(sittings) == 3
+        seat_numbers = sorted(es.seat_number for es in sittings)
+        assert seat_numbers == ['001', '002', '003']
+
+    def test_generate_seating_skips_already_seated(self):
+        """3 students, 1 already has ExamSitting, only 2 new sittings."""
+        import datetime
+
+        semester = SemesterFactory()
+        course = CourseFactory()
+        students = [StudentFactory() for _ in range(3)]
+        for s in students:
+            CourseRegistrationFactory(student=s, course=course, semester=semester)
+
+        # Pre-seat one student
+        ExamSittingFactory(
+            student=students[0], course=course, semester=semester,
+            date=datetime.date(2025, 6, 15),
+        )
+
+        sittings = ExamSittingService.generate_seating_for_course(
+            course=course,
+            semester=semester,
+            venue='Main Hall',
+            exam_date=datetime.date(2025, 6, 15),
+        )
+
+        assert len(sittings) == 2
+        # The pre-seated student should not appear in new sittings
+        seated_student_ids = {es.student_id for es in sittings}
+        assert students[0].id not in seated_student_ids

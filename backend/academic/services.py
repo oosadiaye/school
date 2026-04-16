@@ -6,11 +6,15 @@ from typing import List, Optional
 from django.db import transaction
 from django.db.models import Count, F, QuerySet, Sum
 
+from core.exceptions import ConflictError
 from academic.exceptions import AlreadyPublished, CourseNotFound, RegistrationClosed
 from academic.models import (
     AcademicSession,
+    Attendance,
     Course,
+    CourseAllocation,
     CourseRegistration,
+    ExamSitting,
     Result,
     Semester,
 )
@@ -200,3 +204,128 @@ class SemesterService:
     def get_active() -> Semester | None:
         """Return the currently active semester, or None."""
         return Semester.objects.filter(is_active=True).first()
+
+
+class CourseService:
+    """Handles course lifecycle operations."""
+
+    @staticmethod
+    def safe_delete(course: Course, by) -> None:
+        """Delete a course only if it has no active registrations.
+
+        Raises:
+            ConflictError: if the course has any CourseRegistration records.
+        """
+        if CourseRegistration.objects.filter(course=course).exists():
+            raise ConflictError('Course has active registrations')
+        course.delete()
+
+    @staticmethod
+    def allocate_to_lecturer(
+        course: Course,
+        lecturer,
+        session,
+        by,
+    ) -> CourseAllocation:
+        """Create a course allocation for a lecturer in a given session."""
+        semester = Semester.objects.filter(session=session, is_active=True).first()
+        allocation, _created = CourseAllocation.objects.get_or_create(
+            course=course,
+            semester=semester,
+            defaults={'lecturer': lecturer},
+        )
+        return allocation
+
+
+class AttendanceService:
+    """Handles attendance marking and summaries."""
+
+    @staticmethod
+    def mark_attendance(
+        student,
+        course: Course,
+        semester: Semester,
+        total_classes: int,
+        attended_classes: int,
+    ) -> Attendance:
+        """Create or update an attendance record for the student+course+semester.
+
+        Uses update_or_create to avoid duplicates.
+        """
+        attendance, _created = Attendance.objects.update_or_create(
+            student=student,
+            course=course,
+            semester=semester,
+            defaults={
+                'total_classes': total_classes,
+                'attended_classes': attended_classes,
+            },
+        )
+        return attendance
+
+    @staticmethod
+    def get_course_summary(course: Course, semester: Semester) -> dict:
+        """Return per-student attendance percentages for a course+semester."""
+        records = Attendance.objects.filter(
+            course=course, semester=semester,
+        ).select_related('student__user')
+
+        return {
+            record.student.matric_number: record.attendance_percentage
+            for record in records
+        }
+
+
+class ExamSittingService:
+    """Handles exam seating generation."""
+
+    @staticmethod
+    def generate_seating_for_course(
+        course: Course,
+        semester: Semester,
+        venue: str = 'Main Hall',
+        exam_date=None,
+        exam_time: str = '09:00',
+        seat_prefix: str = '',
+    ) -> List[ExamSitting]:
+        """Generate sequential exam sittings for all registered students.
+
+        Replicates the logic from the former generate_seating view action:
+        1. Get all registered student IDs for the course+semester.
+        2. Exclude students who already have an ExamSitting.
+        3. Assign sequential seat numbers (f"{idx+1:03d}").
+        4. Bulk-create and return the new sittings.
+        """
+        registered_student_ids = list(
+            CourseRegistration.objects.filter(
+                course=course,
+                semester=semester,
+                status='registered',
+            ).select_related('student').values_list('student_id', flat=True)
+        )
+
+        existing_seated = set(
+            ExamSitting.objects.filter(
+                course=course,
+                semester=semester,
+            ).values_list('student_id', flat=True)
+        )
+
+        new_sittings = [
+            ExamSitting(
+                student_id=student_id,
+                course=course,
+                semester=semester,
+                venue=venue,
+                seat_number=f'{idx + 1:03d}',
+                date=exam_date,
+                time=exam_time,
+            )
+            for idx, student_id in enumerate(
+                sid for sid in registered_student_ids
+                if sid not in existing_seated
+            )
+        ]
+
+        ExamSitting.objects.bulk_create(new_sittings, ignore_conflicts=True)
+        return new_sittings

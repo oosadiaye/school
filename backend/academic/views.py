@@ -2,11 +2,10 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
-from django.db.models import Sum, Avg, F, Count  # noqa: F401 – used by generate_seating
 from students.models import Student
 from .models import (
     AcademicSession, Semester, Course, CourseAllocation,
-    CourseRegistration, Attendance, Result, ExamSitting
+    CourseRegistration, Attendance, Result, ExamSitting,
 )
 from .serializers import (
     AcademicSessionSerializer, SemesterSerializer, CourseSerializer,
@@ -14,7 +13,13 @@ from .serializers import (
     CourseRegistrationSerializer, AttendanceSerializer,
     ResultSerializer, ResultCreateSerializer, ExamSittingSerializer
 )
-from .services import RegistrationService, ResultService, SessionService, SemesterService
+from .services import (
+    ExamSittingService,
+    RegistrationService,
+    ResultService,
+    SessionService,
+    SemesterService,
+)
 
 
 class AcademicSessionViewSet(viewsets.ModelViewSet):
@@ -208,46 +213,23 @@ class ExamSittingViewSet(viewsets.ModelViewSet):
         course_id = request.data.get('course_id')
         semester_id = request.data.get('semester_id')
         venue = request.data.get('venue')
-        
+
         if not all([course_id, semester_id, venue]):
             return Response(
                 {'error': 'course_id, semester_id, and venue are required'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
-        
-        registrations = list(CourseRegistration.objects.filter(
-            course_id=course_id,
-            semester_id=semester_id,
-            status='registered'
-        ).select_related('student').values_list('student_id', flat=True))
-        
-        existing_sittings = set(
-            ExamSitting.objects.filter(
-                course_id=course_id,
-                semester_id=semester_id
-            ).values_list('student_id', flat=True)
+
+        course = Course.objects.get(id=course_id)
+        semester = Semester.objects.get(id=semester_id)
+        sittings = ExamSittingService.generate_seating_for_course(
+            course=course,
+            semester=semester,
+            venue=venue,
+            exam_date=request.data.get('date'),
+            exam_time=request.data.get('time', '09:00'),
         )
-        
-        exam_date = request.data.get('date')
-        exam_time = request.data.get('time', '09:00')
-        
-        new_sittings = [
-            ExamSitting(
-                student_id=student_id,
-                course_id=course_id,
-                semester_id=semester_id,
-                venue=venue,
-                seat_number=f"{idx + 1:03d}",
-                date=exam_date,
-                time=exam_time
-            )
-            for idx, student_id in enumerate(registrations)
-            if student_id not in existing_sittings
-        ]
-        
-        ExamSitting.objects.bulk_create(new_sittings, ignore_conflicts=True)
-        
         return Response({
-            'message': f'{len(new_sittings)} exam sittings generated',
-            'count': len(new_sittings)
+            'message': f'{len(sittings)} exam sittings generated',
+            'count': len(sittings),
         })

@@ -4,10 +4,12 @@ import datetime
 import factory
 from academic.models import (
     AcademicSession,
+    Attendance,
     Semester,
     Course,
     CourseAllocation,
     CourseRegistration,
+    ExamSitting,
     Result,
 )
 from accounts.tests.factories import UserFactory
@@ -79,3 +81,27 @@ class ResultFactory(factory.django.DjangoModelFactory):
     exam_score = 50.0
     entered_by = factory.SubFactory(UserFactory, user_type='lecturer')
     is_published = False
+
+
+class AttendanceFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = Attendance
+
+    student = factory.SubFactory(StudentFactory)
+    course = factory.SubFactory(CourseFactory)
+    semester = factory.SubFactory(SemesterFactory)
+    total_classes = 10
+    attended_classes = 8
+
+
+class ExamSittingFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = ExamSitting
+
+    student = factory.SubFactory(StudentFactory)
+    course = factory.SubFactory(CourseFactory)
+    semester = factory.SubFactory(SemesterFactory)
+    venue = 'Main Hall'
+    seat_number = factory.Sequence(lambda n: f'{n + 1:03d}')
+    date = factory.LazyFunction(lambda: datetime.date(2025, 6, 15))
+    time = factory.LazyFunction(lambda: datetime.time(9, 0))
