@@ -13,6 +13,7 @@ def test_health_endpoint_returns_200(client):
     assert data['status'] == 'ok'
     assert 'checks' in data
     assert data['checks']['database'] is True
+    assert data['checks']['redis'] is True
 
 
 @pytest.mark.django_db
@@ -22,3 +23,4 @@ def test_health_endpoint_includes_redis_check(client):
     response = client.get(url)
     data = response.json()
     assert 'redis' in data['checks']
+    assert isinstance(data['checks']['redis'], bool)

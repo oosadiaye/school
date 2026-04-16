@@ -21,7 +21,10 @@ def _check_redis() -> bool:
     """Verify Redis connectivity by pinging the Celery broker URL."""
     try:
         import redis
-        client = redis.from_url(settings.CELERY_BROKER_URL)
+        broker_url = getattr(settings, 'CELERY_BROKER_URL', None)
+        if not broker_url:
+            return False
+        client = redis.from_url(broker_url)
         return bool(client.ping())
     except Exception:
         return False
