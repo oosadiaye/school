@@ -82,7 +82,10 @@ const Dashboard = () => {
           libraryService.getBooks({ page_size: 1 }),
           hostelService.getHostels(),
           academicService.getSessions(),
-          financeService.getFinanceDashboard().catch(() => ({ data: {} })),
+          financeService.getFinanceDashboard().catch((error) => {
+            console.error('Failed to load finance dashboard:', error);
+            return { data: {} };
+          }),
         ]);
 
         setStats({
