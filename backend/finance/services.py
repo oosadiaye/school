@@ -2,17 +2,28 @@
 from __future__ import annotations
 
 import datetime
+import uuid
 from decimal import Decimal
 from typing import List, Optional
 
+from django.db import transaction
 from django.db.models import QuerySet
+from django.utils import timezone
 
+from finance.exceptions import (
+    InvalidPaymentProvider,
+    PaymentAlreadyVerified,
+    PaymentInitiationFailed,
+    PaymentVerificationFailed,
+)
 from finance.models import (
     FeeStructure,
     InstallmentPayment,
     InstallmentPlan,
     Invoice,
+    Payment,
 )
+from finance.payment_gateway import PaymentGateway
 from students.models import Student
 
 
@@ -186,4 +197,150 @@ class InvoiceService:
                 return base_qs.filter(student=student)
             except Student.DoesNotExist:
                 return Invoice.objects.none()
+        return base_qs.all()
+
+
+VALID_PROVIDERS = ('paystack', 'flutterwave', 'stripe')
+
+
+class PaymentService:
+    """Handles payment initiation, verification/reconciliation, and querying."""
+
+    @staticmethod
+    def initiate(
+        invoice: Invoice,
+        provider: str,
+        user_email: str,
+        callback_url: str | None = None,
+    ) -> dict:
+        """Create a pending Payment and initialize it via the payment gateway.
+
+        Returns ``{"payment_id": ..., "reference": ..., "authorization_url": ...}``.
+
+        Raises:
+            InvalidPaymentProvider: if *provider* is not supported.
+            PaymentInitiationFailed: if the gateway rejects the request.
+        """
+        if provider not in VALID_PROVIDERS:
+            raise InvalidPaymentProvider(
+                f"Invalid provider '{provider}'. Must be one of: {', '.join(VALID_PROVIDERS)}"
+            )
+
+        from django.conf import settings as django_settings
+
+        if callback_url is None:
+            callback_url = getattr(
+                django_settings,
+                'PAYMENT_CALLBACK_URL',
+                'http://localhost:5173/payment/callback',
+            )
+
+        payment = Payment.objects.create(
+            invoice=invoice,
+            student=invoice.student,
+            amount=invoice.balance,
+            payment_method='online',
+            transaction_id=f"TXN-{uuid.uuid4().hex[:12].upper()}",
+            status='pending',
+        )
+
+        gateway = PaymentGateway(provider)
+        result = gateway.initialize_transaction(
+            email=user_email,
+            amount=float(payment.amount),
+            callback_url=callback_url,
+            reference=f"INV-{invoice.id}-{uuid.uuid4().hex[:8].upper()}",
+        )
+
+        if not result.get('success'):
+            payment.status = 'failed'
+            payment.save()
+            raise PaymentInitiationFailed(
+                result.get('message', 'Payment initialization failed')
+            )
+
+        payment.reference = result['reference']
+        payment.save()
+
+        return {
+            'payment_id': payment.id,
+            'reference': result['reference'],
+            'authorization_url': result['authorization_url'],
+            'transaction_id': payment.transaction_id,
+            'amount': str(payment.amount),
+            'status': 'pending',
+        }
+
+    @staticmethod
+    def verify_and_reconcile(reference: str, provider: str) -> Payment:
+        """Verify a payment via the gateway and reconcile with the invoice.
+
+        The gateway HTTP call happens *outside* the atomic block so we do not
+        hold a database transaction open during a network round-trip.
+
+        Raises:
+            PaymentAlreadyVerified: if the payment has already been completed.
+            PaymentVerificationFailed: if the gateway reports failure.
+        """
+        try:
+            payment = Payment.objects.select_related('invoice').get(
+                reference=reference
+            )
+        except Payment.DoesNotExist:
+            raise PaymentVerificationFailed(f"Payment with reference '{reference}' not found")
+
+        if payment.status == 'completed':
+            raise PaymentAlreadyVerified(
+                f"Payment {reference} has already been verified"
+            )
+
+        gateway = PaymentGateway(provider)
+        result = gateway.verify_transaction(reference)
+
+        if not result.get('verified'):
+            payment.status = 'failed'
+            payment.save()
+            raise PaymentVerificationFailed(
+                result.get('message', 'Transaction verification failed')
+            )
+
+        with transaction.atomic():
+            payment = Payment.objects.select_for_update().get(pk=payment.pk)
+            payment.status = 'completed'
+            payment.save()
+
+            invoice = payment.invoice
+            invoice.amount_paid += payment.amount
+            # Invoice.save() auto-calculates balance and status
+            invoice.save()
+
+            InstallmentPayment.objects.filter(
+                invoice=invoice,
+                is_paid=False,
+                installment_number=1,
+            ).update(
+                is_paid=True,
+                paid_date=datetime.date.today(),
+            )
+
+        payment.refresh_from_db()
+        return payment
+
+    @staticmethod
+    def get_visible_to(user) -> QuerySet[Payment]:
+        """Return payments visible to the given user.
+
+        Students see only their own; admins/staff see all.
+        """
+        base_qs = Payment.objects.select_related(
+            'invoice',
+            'student__user',
+            'invoice__fee_structure',
+        )
+        if user.user_type == 'student':
+            try:
+                student = user.student_profile
+                return base_qs.filter(student=student)
+            except Student.DoesNotExist:
+                return Payment.objects.none()
         return base_qs.all()

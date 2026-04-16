@@ -18,7 +18,7 @@ from .serializers import (
     InstallmentPlanSerializer, InstallmentPaymentSerializer, FeeWaiverSerializer
 )
 from .payment_gateway import PaymentGateway, generate_payment_link
-from .services import InvoiceService
+from .services import InvoiceService, PaymentService
 import uuid
 
 
@@ -151,16 +151,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
     pagination_class = PageNumberPagination
 
     def get_queryset(self):
-        user = self.request.user
-        if user.user_type == 'student':
-            try:
-                student = user.student_profile
-                return Payment.objects.select_related(
-                    'invoice', 'student__user', 'invoice__fee_structure'
-                ).filter(student=student)
-            except Student.DoesNotExist:
-                return Payment.objects.none()
-        return super().get_queryset()
+        return PaymentService.get_visible_to(self.request.user)
 
     @transaction.atomic
     def perform_create(self, serializer):
@@ -179,111 +170,45 @@ class PaymentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def initiate_payment(self, request):
         invoice_id = request.data.get('invoice_id')
-        amount = request.data.get('amount')
-        payment_method = request.data.get('payment_method', 'online')
-        provider = request.data.get('provider', 'paystack')
-
-        if not invoice_id or not amount:
-            return Response({'error': 'invoice_id and amount are required'}, status=400)
-
-        valid_providers = ['paystack', 'flutterwave', 'stripe']
-        if provider not in valid_providers:
-            return Response(
-                {'error': f'Invalid provider. Must be one of: {", ".join(valid_providers)}'},
-                status=400
-            )
-
+        if not invoice_id:
+            return Response({'error': 'invoice_id is required'}, status=400)
         try:
             invoice = Invoice.objects.get(id=invoice_id)
         except Invoice.DoesNotExist:
             return Response({'error': 'Invoice not found'}, status=404)
 
-        payment = Payment.objects.create(
+        provider = request.data.get('provider', 'paystack')
+        email = request.user.email or f"{invoice.student.matric_number}@student.edu"
+        result = PaymentService.initiate(
             invoice=invoice,
-            student=invoice.student,
-            amount=amount,
-            payment_method=payment_method,
-            transaction_id=f"TXN-{uuid.uuid4().hex[:12].upper()}",
-            status='pending'
+            provider=provider,
+            user_email=email,
+            callback_url=request.data.get('callback_url'),
         )
-
-        result = generate_payment_link(invoice, provider)
-        if result.get('success'):
-            payment.reference = result.get('reference')
-            payment.save()
-            return Response({
-                'payment_id': payment.id,
-                'transaction_id': payment.transaction_id,
-                'authorization_url': result.get('authorization_url'),
-                'amount': str(payment.amount),
-                'status': 'pending'
-            })
-        
-        payment.status = 'failed'
-        payment.save()
-        return Response({'error': result.get('message', 'Payment initialization failed')}, status=400)
+        return Response(result)
 
     @action(detail=False, methods=['post'])
     def verify_payment(self, request):
         reference = request.data.get('reference')
-        provider = request.data.get('provider', 'paystack')
-        
         if not reference:
             return Response({'error': 'reference is required'}, status=400)
 
-        valid_providers = ['paystack', 'flutterwave', 'stripe']
-        if provider not in valid_providers:
-            return Response(
-                {'error': f'Invalid provider. Must be one of: {", ".join(valid_providers)}'},
-                status=400
-            )
-
-        gateway = PaymentGateway(provider)
-        result = gateway.verify_transaction(reference)
-        
-        if result.get('verified'):
-            try:
-                with transaction.atomic():
-                    payment = Payment.objects.select_for_update().get(reference=reference)
-                    if payment.status != 'completed':
-                        payment.status = 'completed'
-                        payment.save()
-                        
-                        invoice = payment.invoice
-                        invoice.amount_paid += payment.amount
-                        if invoice.amount_paid >= invoice.amount:
-                            invoice.status = 'paid'
-                        elif invoice.amount_paid > 0:
-                            invoice.status = 'partially_paid'
-                        invoice.save()
-                        
-                        InstallmentPayment.objects.filter(
-                            invoice=invoice,
-                            is_paid=False,
-                            installment_number=1
-                        ).update(
-                            is_paid=True,
-                            paid_date=datetime.now().date()
-                        )
-                    
-                return Response({'status': 'verified', 'payment': PaymentSerializer(payment).data})
-            except Payment.DoesNotExist:
-                return Response({'error': 'Payment not found'}, status=404)
-        
-        return Response({'status': 'failed', 'message': result.get('message')}, status=400)
+        provider = request.data.get('provider', 'paystack')
+        payment = PaymentService.verify_and_reconcile(
+            reference=reference,
+            provider=provider,
+        )
+        return Response({
+            'status': 'verified',
+            'payment': PaymentSerializer(payment).data,
+        })
 
     @action(detail=False, methods=['get'])
     def my_payments(self, request):
-        try:
-            student = request.user.student_profile
-            payments = Payment.objects.select_related(
-                'invoice', 'student__user', 'invoice__fee_structure'
-            ).filter(student=student)
-            payments = self.paginate_queryset(payments)
-            serializer = self.get_serializer(payments, many=True)
-            return self.get_paginated_response(serializer.data)
-        except Student.DoesNotExist:
-            return Response({'error': 'Student profile not found'}, status=404)
+        payments = PaymentService.get_visible_to(request.user)
+        page = self.paginate_queryset(payments)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
 
 
 class InstallmentPlanViewSet(viewsets.ModelViewSet):

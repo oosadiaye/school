@@ -179,3 +179,289 @@ def test_get_visible_to_admin_returns_all():
 
     qs = InvoiceService.get_visible_to(user=admin)
     assert qs.count() == 2
+
+
+# ===========================================================================
+# PaymentService
+# ===========================================================================
+
+from unittest.mock import patch, MagicMock
+from finance.services import PaymentService
+from finance.models import Payment
+from finance.exceptions import (
+    InvalidPaymentProvider,
+    PaymentAlreadyVerified,
+    PaymentInitiationFailed,
+    PaymentVerificationFailed,
+)
+from finance.tests.factories import PaymentFactory
+
+
+@pytest.mark.django_db
+def test_initiate_creates_pending_payment():
+    """Initiate creates a Payment record with status='pending'."""
+    invoice = InvoiceFactory(amount=Decimal('10000.00'))
+
+    with patch('finance.services.PaymentGateway') as MockGW:
+        instance = MockGW.return_value
+        instance.initialize_transaction.return_value = {
+            'success': True,
+            'reference': 'REF-123',
+            'authorization_url': 'https://pay.example.com/auth',
+        }
+        result = PaymentService.initiate(
+            invoice=invoice,
+            provider='paystack',
+            user_email='student@test.com',
+        )
+
+    payment = Payment.objects.get(id=result['payment_id'])
+    assert payment.status == 'pending'
+    assert payment.reference == 'REF-123'
+    assert result['authorization_url'] == 'https://pay.example.com/auth'
+
+
+@pytest.mark.django_db
+def test_initiate_raises_on_invalid_provider():
+    """provider='bitcoin' raises InvalidPaymentProvider."""
+    invoice = InvoiceFactory()
+    with pytest.raises(InvalidPaymentProvider):
+        PaymentService.initiate(
+            invoice=invoice,
+            provider='bitcoin',
+            user_email='student@test.com',
+        )
+
+
+@pytest.mark.django_db
+def test_initiate_calls_gateway_and_returns_url():
+    """Mock gateway initialize and verify authorization_url in response."""
+    invoice = InvoiceFactory(amount=Decimal('50000.00'))
+
+    with patch('finance.services.PaymentGateway') as MockGW:
+        instance = MockGW.return_value
+        instance.initialize_transaction.return_value = {
+            'success': True,
+            'reference': 'REF-ABC',
+            'authorization_url': 'https://checkout.paystack.com/abc',
+        }
+        result = PaymentService.initiate(
+            invoice=invoice,
+            provider='paystack',
+            user_email='test@example.com',
+            callback_url='https://myapp.com/callback',
+        )
+
+    assert 'authorization_url' in result
+    assert result['authorization_url'] == 'https://checkout.paystack.com/abc'
+    instance.initialize_transaction.assert_called_once()
+
+
+@pytest.mark.django_db
+def test_initiate_sets_failed_when_gateway_fails():
+    """If gateway returns success=False, payment status is 'failed' and exception raised."""
+    invoice = InvoiceFactory(amount=Decimal('10000.00'))
+
+    with patch('finance.services.PaymentGateway') as MockGW:
+        instance = MockGW.return_value
+        instance.initialize_transaction.return_value = {
+            'success': False,
+            'message': 'Network error',
+        }
+        with pytest.raises(PaymentInitiationFailed):
+            PaymentService.initiate(
+                invoice=invoice,
+                provider='paystack',
+                user_email='student@test.com',
+            )
+
+    # Payment was created then marked failed
+    payment = Payment.objects.filter(invoice=invoice, status='failed').first()
+    assert payment is not None
+
+
+@pytest.mark.django_db
+def test_verify_and_reconcile_updates_payment_and_invoice():
+    """Successful verification updates payment status and reduces invoice balance."""
+    invoice = InvoiceFactory(amount=Decimal('10000.00'))
+    payment = PaymentFactory(
+        invoice=invoice,
+        student=invoice.student,
+        amount=Decimal('10000.00'),
+        status='pending',
+        reference='REF-VERIFY',
+    )
+
+    with patch('finance.services.PaymentGateway') as MockGW:
+        instance = MockGW.return_value
+        instance.verify_transaction.return_value = {
+            'verified': True,
+            'amount': 10000.0,
+            'reference': 'REF-VERIFY',
+        }
+        result = PaymentService.verify_and_reconcile(
+            reference='REF-VERIFY',
+            provider='paystack',
+        )
+
+    assert result.status == 'completed'
+    invoice.refresh_from_db()
+    assert invoice.amount_paid == Decimal('10000.00')
+    assert invoice.status == 'paid'
+
+
+@pytest.mark.django_db
+def test_verify_raises_already_verified():
+    """Payment with status='completed' raises PaymentAlreadyVerified."""
+    invoice = InvoiceFactory()
+    PaymentFactory(
+        invoice=invoice,
+        student=invoice.student,
+        status='completed',
+        reference='REF-DONE',
+    )
+
+    with pytest.raises(PaymentAlreadyVerified):
+        PaymentService.verify_and_reconcile(
+            reference='REF-DONE',
+            provider='paystack',
+        )
+
+
+@pytest.mark.django_db
+def test_verify_raises_when_gateway_says_failed():
+    """Mock gateway verify failure raises PaymentVerificationFailed."""
+    invoice = InvoiceFactory()
+    PaymentFactory(
+        invoice=invoice,
+        student=invoice.student,
+        status='pending',
+        reference='REF-FAIL',
+    )
+
+    with patch('finance.services.PaymentGateway') as MockGW:
+        instance = MockGW.return_value
+        instance.verify_transaction.return_value = {
+            'verified': False,
+            'message': 'Transaction not found',
+        }
+        with pytest.raises(PaymentVerificationFailed):
+            PaymentService.verify_and_reconcile(
+                reference='REF-FAIL',
+                provider='paystack',
+            )
+
+    payment = Payment.objects.get(reference='REF-FAIL')
+    assert payment.status == 'failed'
+
+
+@pytest.mark.django_db
+def test_partial_payment_reduces_balance_without_marking_paid():
+    """Invoice.amount=10000, payment.amount=5000 -> partially_paid."""
+    invoice = InvoiceFactory(amount=Decimal('10000.00'))
+    payment = PaymentFactory(
+        invoice=invoice,
+        student=invoice.student,
+        amount=Decimal('5000.00'),
+        status='pending',
+        reference='REF-PARTIAL',
+    )
+
+    with patch('finance.services.PaymentGateway') as MockGW:
+        instance = MockGW.return_value
+        instance.verify_transaction.return_value = {
+            'verified': True,
+            'amount': 5000.0,
+            'reference': 'REF-PARTIAL',
+        }
+        PaymentService.verify_and_reconcile(
+            reference='REF-PARTIAL',
+            provider='paystack',
+        )
+
+    invoice.refresh_from_db()
+    assert invoice.amount_paid == Decimal('5000.00')
+    assert invoice.balance == Decimal('5000.00')
+    assert invoice.status == 'partially_paid'
+
+
+@pytest.mark.django_db
+def test_full_payment_marks_invoice_paid():
+    """Invoice.amount=10000, payment.amount=10000 -> paid."""
+    invoice = InvoiceFactory(amount=Decimal('10000.00'))
+    PaymentFactory(
+        invoice=invoice,
+        student=invoice.student,
+        amount=Decimal('10000.00'),
+        status='pending',
+        reference='REF-FULL',
+    )
+
+    with patch('finance.services.PaymentGateway') as MockGW:
+        instance = MockGW.return_value
+        instance.verify_transaction.return_value = {
+            'verified': True,
+            'amount': 10000.0,
+            'reference': 'REF-FULL',
+        }
+        PaymentService.verify_and_reconcile(
+            reference='REF-FULL',
+            provider='paystack',
+        )
+
+    invoice.refresh_from_db()
+    assert invoice.balance == Decimal('0.00')
+    assert invoice.status == 'paid'
+
+
+@pytest.mark.django_db
+def test_verify_is_idempotent():
+    """Calling verify twice with same reference: second raises PaymentAlreadyVerified."""
+    invoice = InvoiceFactory(amount=Decimal('10000.00'))
+    PaymentFactory(
+        invoice=invoice,
+        student=invoice.student,
+        amount=Decimal('10000.00'),
+        status='pending',
+        reference='REF-IDEM',
+    )
+
+    with patch('finance.services.PaymentGateway') as MockGW:
+        instance = MockGW.return_value
+        instance.verify_transaction.return_value = {
+            'verified': True,
+            'amount': 10000.0,
+            'reference': 'REF-IDEM',
+        }
+        PaymentService.verify_and_reconcile(reference='REF-IDEM', provider='paystack')
+
+    # Second call should raise
+    with pytest.raises(PaymentAlreadyVerified):
+        PaymentService.verify_and_reconcile(reference='REF-IDEM', provider='paystack')
+
+
+@pytest.mark.django_db
+def test_get_visible_to_student_returns_own_payments():
+    """Student sees only own payments."""
+    student = StudentFactory()
+    own_payment = PaymentFactory(
+        invoice=InvoiceFactory(student=student),
+        student=student,
+    )
+    other_payment = PaymentFactory()
+
+    qs = PaymentService.get_visible_to(user=student.user)
+    ids = set(qs.values_list('id', flat=True))
+    assert own_payment.id in ids
+    assert other_payment.id not in ids
+
+
+@pytest.mark.django_db
+def test_get_visible_to_admin_returns_all_payments():
+    """Admin sees all payments."""
+    admin = UserFactory(user_type='admin')
+    PaymentFactory()
+    PaymentFactory()
+
+    qs = PaymentService.get_visible_to(user=admin)
+    assert qs.count() == 2
