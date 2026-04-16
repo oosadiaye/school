@@ -1,0 +1,4 @@
+/* Dashboard specific styles are now managed in Layout.css */
+.dashboard-content {
+  width: 100%;
+}

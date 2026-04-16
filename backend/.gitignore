@@ -1,0 +1,14 @@
+*.pyc
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+env/
+.env
+media/uploads/
+staticfiles/
+celerybeat-schedule
+*.log
