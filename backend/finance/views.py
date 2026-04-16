@@ -18,6 +18,7 @@ from .serializers import (
     InstallmentPlanSerializer, InstallmentPaymentSerializer, FeeWaiverSerializer
 )
 from .payment_gateway import PaymentGateway, generate_payment_link
+from .services import InvoiceService
 import uuid
 
 
@@ -70,122 +71,43 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     pagination_class = PageNumberPagination
 
     def get_queryset(self):
-        user = self.request.user
-        if user.user_type == 'student':
-            try:
-                student = user.student_profile
-                return Invoice.objects.select_related(
-                    'student__user', 'fee_structure__fee_type', 'fee_structure__programme'
-                ).filter(student=student)
-            except Student.DoesNotExist:
-                return Invoice.objects.none()
-        return super().get_queryset()
+        return InvoiceService.get_visible_to(self.request.user)
 
     @action(detail=False, methods=['post'], permission_classes=[IsAdminUser])
     def generate_invoices(self, request):
-        """Generate invoices for students"""
+        """Generate invoices for students."""
         fee_structure_id = request.data.get('fee_structure_id')
-        student_ids = request.data.get('student_ids', [])
-
         if not fee_structure_id:
             return Response({'error': 'fee_structure_id is required'}, status=400)
-
         try:
-            fee_structure = FeeStructure.objects.get(id=fee_structure_id)
+            FeeStructure.objects.get(id=fee_structure_id)
         except FeeStructure.DoesNotExist:
             return Response({'error': 'Fee structure not found'}, status=404)
-
-        if student_ids:
-            students = Student.objects.filter(id__in=student_ids)
-        else:
-            students = Student.objects.filter(programme=fee_structure.programme, level=fee_structure.level)
-
-        existing_invoices = set(
-            Invoice.objects.filter(
-                fee_structure=fee_structure,
-                student_id__in=students.values_list('id', flat=True)
-            ).values_list('student_id', flat=True)
+        student_ids = request.data.get('student_ids') or None
+        result = InvoiceService.generate_bulk(
+            fee_structure_id=fee_structure_id,
+            student_ids=student_ids,
         )
-
-        due_date = fee_structure.due_date or datetime.now().date()
-        new_invoices = [
-            Invoice(
-                student=student,
-                fee_structure=fee_structure,
-                amount=fee_structure.amount,
-                due_date=due_date
-            )
-            for student in students
-            if student.id not in existing_invoices
-        ]
-
-        created_invoices = Invoice.objects.bulk_create(new_invoices, ignore_conflicts=True)
-
-        if fee_structure.auto_generate and created_invoices:
-            self.create_installments_bulk(created_invoices, fee_structure)
-
         return Response({
-            'message': f'{len(created_invoices)} invoices generated',
-            'count': len(created_invoices)
+            'message': f'{result["created"]} invoices generated',
+            'count': result['created'],
         })
-
-    def create_installments_bulk(self, invoices, fee_structure):
-        """Create installment payments for invoices in bulk"""
-        plans = list(InstallmentPlan.objects.filter(fee_structure=fee_structure, is_active=True))
-        if not plans:
-            return
-
-        new_payments = []
-        for invoice in invoices:
-            for plan in plans:
-                amount_per_installment = float(invoice.amount) / plan.number_of_installments
-                for i in range(1, plan.number_of_installments + 1):
-                    due_date = plan.due_dates[i-1] if i-1 < len(plan.due_dates) else invoice.due_date
-                    new_payments.append(InstallmentPayment(
-                        installment_plan=plan,
-                        invoice=invoice,
-                        installment_number=i,
-                        amount=amount_per_installment,
-                        due_date=due_date
-                    ))
-
-        InstallmentPayment.objects.bulk_create(new_payments, ignore_conflicts=True)
 
     @action(detail=False, methods=['post'], permission_classes=[IsAdminUser])
     def generate_for_student(self, request):
-        """Generate invoice for a newly registered student"""
+        """Generate invoices for a newly registered student."""
         student_id = request.data.get('student_id')
-        session = request.data.get('session')
-        
         if not student_id:
             return Response({'error': 'student_id is required'}, status=400)
-
         try:
             student = Student.objects.select_related('programme').get(id=student_id)
         except Student.DoesNotExist:
             return Response({'error': 'Student not found'}, status=404)
-
-        fee_structures = FeeStructure.objects.filter(
-            programme=student.programme,
-            level=student.level,
-            session=session or student.admission_year,
-            auto_generate=True
-        )
-
-        created_invoices = []
-        for fs in fee_structures:
-            invoice, created = Invoice.objects.get_or_create(
-                student=student,
-                fee_structure=fs,
-                defaults={'amount': fs.amount, 'due_date': fs.due_date or datetime.now().date()}
-            )
-            if created:
-                created_invoices.append(invoice)
-                self.create_installments_bulk([invoice], fs)
-
+        session = request.data.get('session') or str(student.admission_year)
+        created = InvoiceService.generate_for_student(student=student, session=session)
         return Response({
-            'message': f'{len(created_invoices)} invoices generated for student',
-            'count': len(created_invoices)
+            'message': f'{len(created)} invoices generated for student',
+            'count': len(created),
         })
 
     @action(detail=True, methods=['post'])
@@ -206,27 +128,18 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def my_invoices(self, request):
-        try:
-            student = request.user.student_profile
-            invoices = Invoice.objects.select_related(
-                'student__user', 'fee_structure__fee_type', 'fee_structure__programme'
-            ).filter(student=student)
-            invoices = self.paginate_queryset(invoices)
-            serializer = self.get_serializer(invoices, many=True)
-            return self.get_paginated_response(serializer.data)
-        except Student.DoesNotExist:
-            return Response({'error': 'Student profile not found'}, status=404)
+        """Return the current student's invoices."""
+        invoices = InvoiceService.get_visible_to(request.user)
+        page = self.paginate_queryset(invoices)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
 
     @action(detail=False, methods=['get'], permission_classes=[IsAdminUser])
     def overdue(self, request):
-        """Get overdue invoices"""
-        today = datetime.now().date()
-        overdue = Invoice.objects.filter(
-            due_date__lt=today,
-            status__in=['pending', 'partially_paid']
-        ).select_related('student__user', 'fee_structure__fee_type')
-        overdue = self.paginate_queryset(overdue)
-        serializer = self.get_serializer(overdue, many=True)
+        """Get overdue invoices."""
+        overdue_qs = InvoiceService.list_overdue()
+        page = self.paginate_queryset(overdue_qs)
+        serializer = self.get_serializer(page, many=True)
         return self.get_paginated_response(serializer.data)
 
 
