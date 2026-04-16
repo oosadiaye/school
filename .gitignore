@@ -3,6 +3,7 @@
 Thumbs.db
 desktop.ini
 nul
+# nul is a Windows reserved device name sometimes created by accident
 
 # IDE
 .idea/
@@ -14,15 +15,21 @@ admin_output.txt
 admin_error.txt
 *.log
 
-# Environment
+# Environment (all .env variants except the committed template)
 **/.env
-**/.env.local
+**/.env.*
 !**/.env.example
 
 # Dependencies
 **/node_modules/
 **/venv/
 **/__pycache__/
+
+# Python artifacts
+**/*.pyc
+**/.venv/
+**/env/
+**/celerybeat-schedule
 
 # Build outputs
 **/dist/
