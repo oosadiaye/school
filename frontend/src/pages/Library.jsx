@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { studentService } from '../services/api';
+import { libraryService } from '../services/api';
 
 const Library = () => {
   const [books, setBooks] = useState([]);
@@ -21,7 +21,7 @@ const Library = () => {
 
   const fetchBooks = async () => {
     try {
-      const response = await studentService.getFaculties();
+      const response = await libraryService.getBooks();
       setBooks(response.data.results || []);
     } catch (error) {
       console.error('Error fetching books:', error);
@@ -33,10 +33,14 @@ const Library = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    alert('Book added successfully!');
-    setShowForm(false);
-    setFormData({ title: '', author: '', isbn: '', category: '', quantity: 1, available: 1, shelf_location: '' });
-    fetchBooks();
+    try {
+      await libraryService.createBook(formData);
+      setShowForm(false);
+      setFormData({ title: '', author: '', isbn: '', category: '', quantity: 1, available: 1, shelf_location: '' });
+      await fetchBooks();
+    } catch (error) {
+      console.error('Error creating book:', error);
+    }
   };
 
   const handleChange = (e) => {
