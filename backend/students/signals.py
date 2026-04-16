@@ -1,30 +1,47 @@
+"""Signals for the students app -- fires on student lifecycle events."""
+import logging
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from .models import Student
-from finance.models import FeeStructure, Invoice
-from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
 
 @receiver(post_save, sender=Student)
-def create_invoices_on_registration(sender, instance, created, **kwargs):
-    """Create invoices automatically when a new student is registered"""
-    if created:
-        session = f"{instance.admission_year}/{instance.admission_year + 1}"
-        
-        fee_structures = FeeStructure.objects.filter(
-            programme=instance.programme,
-            level=str(instance.level),
-            session=session,
-            auto_generate=True
-        )
-        
-        for fs in fee_structures:
-            invoice, created = Invoice.objects.get_or_create(
-                student=instance,
-                fee_structure=fs,
-                defaults={
-                    'amount': fs.amount,
-                    'due_date': fs.due_date or datetime.now().date()
-                }
+def on_student_created(sender, instance, created, **kwargs):
+    """When a new student is created, generate invoices and send welcome notification."""
+    if not created:
+        return
+
+    # 1. Auto-generate invoices for the student's session
+    try:
+        from academic.models import AcademicSession
+        from finance.services import InvoiceService
+
+        # Find session matching admission year
+        session = AcademicSession.objects.filter(
+            is_current=True
+        ).first()
+
+        if session:
+            invoices = InvoiceService.generate_for_student(instance, session.name)
+            logger.info(
+                "Auto-generated %d invoices for new student %s",
+                len(invoices) if isinstance(invoices, list) else 0,
+                instance.matric_number,
             )
-            if created:
-                print(f"Auto-generated invoice for student {instance.matric_number}: {fs.fee_type.name}")
+    except Exception:
+        logger.exception("Failed to auto-generate invoices for student %s", instance.matric_number)
+
+    # 2. Create welcome notification
+    try:
+        from notifications.services import NotificationService
+
+        NotificationService.create(
+            user=instance.user,
+            level='success',
+            title='Welcome to TIMS',
+            message=f'Your registration is complete. Matric number: {instance.matric_number}',
+        )
+    except Exception:
+        logger.exception("Failed to create welcome notification for student %s", instance.matric_number)
