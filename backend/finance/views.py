@@ -2,11 +2,7 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
-from django.db import models, transaction
-from django.db.models import Sum, Count, Avg, Q, F, DecimalField
-from django.db.models.functions import Coalesce
-from django.utils import timezone
-from datetime import datetime, timedelta
+from django.db import transaction
 from students.models import Student
 from .models import (
     FeeType, FeeStructure, Invoice, Payment, Scholarship, StudentScholarship,
@@ -17,14 +13,20 @@ from .serializers import (
     PaymentSerializer, ScholarshipSerializer, StudentScholarshipSerializer,
     InstallmentPlanSerializer, InstallmentPaymentSerializer, FeeWaiverSerializer
 )
-from .payment_gateway import PaymentGateway, generate_payment_link
-from .services import InvoiceService, PaymentService
+from .payment_gateway import generate_payment_link
+from .services import (
+    FeeWaiverService,
+    FinanceReportService,
+    InvoiceService,
+    PaymentService,
+)
 import uuid
 
 
 class IsAdminUser(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user and request.user.is_authenticated and request.user.user_type == 'admin'
+
 
 class FeeTypeViewSet(viewsets.ModelViewSet):
     queryset = FeeType.objects.all()
@@ -42,23 +44,19 @@ class FeeStructureViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def create_installment_plan(self, request, pk=None):
-        """Create installment plan for a fee structure"""
-        fee_structure = self.get_object()
+        """Create installment plan for a fee structure."""
+        from datetime import datetime, timedelta
+        fs = self.get_object()
         data = request.data
-        
         due_dates = data.get('due_dates', [])
+        num = int(data.get('number_of_installments', 2))
         if not due_dates:
-            num_installments = int(data.get('number_of_installments', 2))
-            amount = float(fee_structure.amount) / num_installments
-            base_date = fee_structure.due_date or datetime.now().date()
-            due_dates = [(base_date + timedelta(days=30*i)).isoformat() for i in range(1, num_installments+1)]
-        
+            base = fs.due_date or datetime.now().date()
+            due_dates = [(base + timedelta(days=30 * i)).isoformat() for i in range(1, num + 1)]
         plan = InstallmentPlan.objects.create(
-            name=data.get('name', f"{fee_structure.fee_type.name} Plan"),
-            fee_structure=fee_structure,
-            number_of_installments=int(data.get('number_of_installments', 2)),
-            due_dates=due_dates,
-            penalty_percentage=data.get('penalty_percentage', 0)
+            name=data.get('name', f"{fs.fee_type.name} Plan"),
+            fee_structure=fs, number_of_installments=num,
+            due_dates=due_dates, penalty_percentage=data.get('penalty_percentage', 0),
         )
         return Response(InstallmentPlanSerializer(plan).data, status=201)
 
@@ -83,15 +81,11 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             FeeStructure.objects.get(id=fee_structure_id)
         except FeeStructure.DoesNotExist:
             return Response({'error': 'Fee structure not found'}, status=404)
-        student_ids = request.data.get('student_ids') or None
         result = InvoiceService.generate_bulk(
             fee_structure_id=fee_structure_id,
-            student_ids=student_ids,
+            student_ids=request.data.get('student_ids') or None,
         )
-        return Response({
-            'message': f'{result["created"]} invoices generated',
-            'count': result['created'],
-        })
+        return Response({'message': f'{result["created"]} invoices generated', 'count': result['created']})
 
     @action(detail=False, methods=['post'], permission_classes=[IsAdminUser])
     def generate_for_student(self, request):
@@ -105,42 +99,30 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Student not found'}, status=404)
         session = request.data.get('session') or str(student.admission_year)
         created = InvoiceService.generate_for_student(student=student, session=session)
-        return Response({
-            'message': f'{len(created)} invoices generated for student',
-            'count': len(created),
-        })
+        return Response({'message': f'{len(created)} invoices generated for student', 'count': len(created)})
 
     @action(detail=True, methods=['post'])
     def generate_payment_link(self, request, pk=None):
-        """Generate payment link for an invoice"""
+        """Generate payment link for an invoice."""
         invoice = self.get_object()
         provider = request.data.get('provider', 'paystack')
-        
         valid_providers = ['paystack', 'flutterwave', 'stripe']
         if provider not in valid_providers:
-            return Response(
-                {'error': f'Invalid provider. Must be one of: {", ".join(valid_providers)}'},
-                status=400
-            )
-        
-        result = generate_payment_link(invoice, provider)
-        return Response(result)
+            return Response({'error': f'Invalid provider. Must be one of: {", ".join(valid_providers)}'}, status=400)
+        return Response(generate_payment_link(invoice, provider))
 
     @action(detail=False, methods=['get'])
     def my_invoices(self, request):
         """Return the current student's invoices."""
         invoices = InvoiceService.get_visible_to(request.user)
         page = self.paginate_queryset(invoices)
-        serializer = self.get_serializer(page, many=True)
-        return self.get_paginated_response(serializer.data)
+        return self.get_paginated_response(self.get_serializer(page, many=True).data)
 
     @action(detail=False, methods=['get'], permission_classes=[IsAdminUser])
     def overdue(self, request):
         """Get overdue invoices."""
-        overdue_qs = InvoiceService.list_overdue()
-        page = self.paginate_queryset(overdue_qs)
-        serializer = self.get_serializer(page, many=True)
-        return self.get_paginated_response(serializer.data)
+        page = self.paginate_queryset(InvoiceService.list_overdue())
+        return self.get_paginated_response(self.get_serializer(page, many=True).data)
 
 
 class PaymentViewSet(viewsets.ModelViewSet):
@@ -157,7 +139,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         payment = serializer.save(
             transaction_id=f"TXN-{uuid.uuid4().hex[:12].upper()}",
-            status='completed'
+            status='completed',
         )
         invoice = payment.invoice
         invoice.amount_paid += payment.amount
@@ -169,6 +151,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def initiate_payment(self, request):
+        """Initiate a payment via the gateway."""
         invoice_id = request.data.get('invoice_id')
         if not invoice_id:
             return Response({'error': 'invoice_id is required'}, status=400)
@@ -176,39 +159,30 @@ class PaymentViewSet(viewsets.ModelViewSet):
             invoice = Invoice.objects.get(id=invoice_id)
         except Invoice.DoesNotExist:
             return Response({'error': 'Invoice not found'}, status=404)
-
         provider = request.data.get('provider', 'paystack')
         email = request.user.email or f"{invoice.student.matric_number}@student.edu"
         result = PaymentService.initiate(
-            invoice=invoice,
-            provider=provider,
-            user_email=email,
-            callback_url=request.data.get('callback_url'),
+            invoice=invoice, provider=provider,
+            user_email=email, callback_url=request.data.get('callback_url'),
         )
         return Response(result)
 
     @action(detail=False, methods=['post'])
     def verify_payment(self, request):
+        """Verify a payment reference."""
         reference = request.data.get('reference')
         if not reference:
             return Response({'error': 'reference is required'}, status=400)
-
-        provider = request.data.get('provider', 'paystack')
         payment = PaymentService.verify_and_reconcile(
-            reference=reference,
-            provider=provider,
+            reference=reference, provider=request.data.get('provider', 'paystack'),
         )
-        return Response({
-            'status': 'verified',
-            'payment': PaymentSerializer(payment).data,
-        })
+        return Response({'status': 'verified', 'payment': PaymentSerializer(payment).data})
 
     @action(detail=False, methods=['get'])
     def my_payments(self, request):
-        payments = PaymentService.get_visible_to(request.user)
-        page = self.paginate_queryset(payments)
-        serializer = self.get_serializer(page, many=True)
-        return self.get_paginated_response(serializer.data)
+        """Return the current user's payments."""
+        page = self.paginate_queryset(PaymentService.get_visible_to(request.user))
+        return self.get_paginated_response(self.get_serializer(page, many=True).data)
 
 
 class InstallmentPlanViewSet(viewsets.ModelViewSet):
@@ -219,9 +193,8 @@ class InstallmentPlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def installments(self, request, pk=None):
-        plan = self.get_object()
-        installments = plan.payments.all()
-        return Response(InstallmentPaymentSerializer(installments, many=True).data)
+        """List installments for a plan."""
+        return Response(InstallmentPaymentSerializer(self.get_object().payments.all(), many=True).data)
 
 
 class FeeWaiverViewSet(viewsets.ModelViewSet):
@@ -233,27 +206,10 @@ class FeeWaiverViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
-        """Approve a fee waiver"""
+        """Approve a fee waiver."""
         waiver = self.get_object()
-        if waiver.is_approved:
-            return Response({'message': 'Waiver already approved'}, status=400)
-        
-        waiver.is_approved = True
-        waiver.approved_by = request.user
-        waiver.approved_at = datetime.now()
-        waiver.save()
-
-        if waiver.waiver_type == 'full':
-            waiver.invoice.balance = 0
-            waiver.invoice.status = 'waived'
-        elif waiver.waiver_type == 'partial':
-            waiver.invoice.balance = max(0, waiver.invoice.balance - waiver.amount)
-        elif waiver.waiver_type == 'percentage':
-            reduction = waiver.invoice.amount * (waiver.percentage / 100)
-            waiver.invoice.balance = max(0, waiver.invoice.balance - reduction)
-        
-        waiver.invoice.save()
-        return Response(FeeWaiverSerializer(waiver).data)
+        result = FeeWaiverService.approve_waiver(waiver=waiver, approved_by=request.user)
+        return Response(FeeWaiverSerializer(result).data)
 
 
 class ScholarshipViewSet(viewsets.ModelViewSet):
@@ -272,17 +228,14 @@ class StudentScholarshipViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def dashboard(self, request):
-        total_collected = Payment.objects.filter(status='completed').aggregate(Sum('amount'))['amount__sum'] or 0
-        total_pending = Invoice.objects.filter(status__in=['pending', 'partially_paid']).aggregate(Sum('balance'))['balance__sum'] or 0
-        total_invoices = Invoice.objects.count()
-        paid_invoices = Invoice.objects.filter(status='paid').count()
-
+        """Finance dashboard summary."""
+        data = FinanceReportService.summary()
         return Response({
-            'total_collected': float(total_collected),
-            'total_pending': float(total_pending),
-            'total_invoices': total_invoices,
-            'paid_invoices': paid_invoices,
-            'collection_rate': round((paid_invoices / total_invoices * 100) if total_invoices > 0 else 0, 2)
+            'total_collected': data['total_collected'],
+            'total_pending': data['total_pending'],
+            'total_invoices': data['total_invoices'],
+            'paid_invoices': data['paid_invoices'],
+            'collection_rate': data['collection_rate'],
         })
 
 
@@ -291,121 +244,26 @@ class FinanceReportViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'])
     def summary(self, request):
-        """Comprehensive finance summary"""
-        today = datetime.now().date()
-        month_start = today.replace(day=1)
-        
-        this_month = Payment.objects.filter(
-            payment_date__gte=month_start,
-            status='completed'
-        ).aggregate(
-            total=Sum('amount'),
-            count=Count('id')
-        )
-        
-        total_collected = Payment.objects.filter(status='completed').aggregate(Sum('amount'))['amount__sum'] or 0
-        
-        invoice_stats = Invoice.objects.aggregate(
-            total_count=Count('id'),
-            paid_count=Count('id', filter=models.Q(status='paid')),
-            pending_sum=Sum('balance', filter=models.Q(status__in=['pending', 'partially_paid']))
-        )
-        
-        overdue_invoices = Invoice.objects.filter(
-            due_date__lt=today,
-            status__in=['pending', 'partially_paid']
-        ).count()
-
-        total_invoices = invoice_stats['total_count']
-        paid_invoices = invoice_stats['paid_count']
-        
-        return Response({
-            'total_collected': float(total_collected),
-            'total_pending': float(invoice_stats['pending_sum'] or 0),
-            'total_invoices': total_invoices,
-            'paid_invoices': paid_invoices,
-            'overdue_invoices': overdue_invoices,
-            'collection_rate': round((paid_invoices / total_invoices * 100) if total_invoices > 0 else 0, 2),
-            'this_month': {
-                'collected': float(this_month['total'] or 0),
-                'transactions': this_month['count'] or 0
-            }
-        })
+        """Comprehensive finance summary."""
+        return Response(FinanceReportService.summary())
 
     @action(detail=False, methods=['get'])
     def by_programme(self, request):
-        """Finance breakdown by programme"""
-        from students.models import Programme
-        
-        programme_stats = Invoice.objects.filter(
-            fee_structure__programme__isnull=False
-        ).values(
-            'fee_structure__programme__name'
-        ).annotate(
-            total_invoices=Count('id'),
-            collected=Sum('amount_paid'),
-            pending=Sum('balance')
-        )
-        
-        return Response([{
-            'programme': stat['fee_structure__programme__name'],
-            'total_invoices': stat['total_invoices'],
-            'collected': float(stat['collected'] or 0),
-            'pending': float(stat['pending'] or 0)
-        } for stat in programme_stats])
+        """Finance breakdown by programme."""
+        return Response(FinanceReportService.by_programme())
 
     @action(detail=False, methods=['get'])
     def by_level(self, request):
-        """Finance breakdown by level"""
-        level_stats = Invoice.objects.filter(
-            fee_structure__level__isnull=False
-        ).values(
-            'fee_structure__level'
-        ).annotate(
-            total_invoices=Count('id'),
-            collected=Sum('amount_paid'),
-            pending=Sum('balance')
-        )
-        
-        return Response([{
-            'level': stat['fee_structure__level'],
-            'total_invoices': stat['total_invoices'],
-            'collected': float(stat['collected'] or 0),
-            'pending': float(stat['pending'] or 0)
-        } for stat in level_stats])
+        """Finance breakdown by level."""
+        return Response(FinanceReportService.by_level())
 
     @action(detail=False, methods=['get'])
     def payment_trends(self, request):
-        """Payment trends over time"""
+        """Payment trends over time."""
         days = int(request.query_params.get('days', 30))
-        today = datetime.now().date()
-        start_date = today - timedelta(days=days)
-        
-        payments = Payment.objects.filter(
-            payment_date__gte=start_date,
-            status='completed'
-        ).extra(
-            select={'day': "DATE(payment_date)"}
-        ).values('day').annotate(
-            total=Sum('amount'),
-            count=Count('id')
-        ).order_by('day')
-        
-        return Response([{
-            'date': p['day'],
-            'amount': float(p['total']),
-            'count': p['count']
-        } for p in payments])
+        return Response(FinanceReportService.payment_trends(days=days))
 
     @action(detail=False, methods=['get'])
     def waivers_report(self, request):
-        """Fee waivers report"""
-        total_waived = FeeWaiver.objects.filter(is_approved=True).aggregate(
-            total=Sum('amount')
-        )['total'] or 0
-        
-        return Response({
-            'total_waivers': FeeWaiver.objects.filter(is_approved=True).count(),
-            'total_amount_waived': float(total_waived),
-            'pending_waivers': FeeWaiver.objects.filter(is_approved=False).count()
-        })
+        """Fee waivers report."""
+        return Response(FinanceReportService.waivers_report())

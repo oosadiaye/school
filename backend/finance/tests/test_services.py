@@ -465,3 +465,120 @@ def test_get_visible_to_admin_returns_all_payments():
 
     qs = PaymentService.get_visible_to(user=admin)
     assert qs.count() == 2
+
+
+# ===========================================================================
+# FeeWaiverService
+# ===========================================================================
+
+from finance.services import FeeWaiverService
+from finance.exceptions import WaiverAlreadyApproved
+from finance.tests.factories import FeeWaiverFactory
+
+
+@pytest.mark.django_db
+def test_approve_full_waiver_zeros_invoice_balance():
+    """Full waiver sets invoice balance to 0 and status to waived."""
+    invoice = InvoiceFactory(amount=Decimal('50000.00'))
+    waiver = FeeWaiverFactory(invoice=invoice, waiver_type='full')
+    admin = UserFactory(user_type='admin')
+
+    result = FeeWaiverService.approve_waiver(waiver=waiver, approved_by=admin)
+
+    assert result.is_approved is True
+    invoice.refresh_from_db()
+    assert invoice.balance == Decimal('0.00')
+    assert invoice.status == 'waived'
+
+
+@pytest.mark.django_db
+def test_approve_partial_waiver_reduces_balance():
+    """Partial waiver reduces invoice balance by waiver.amount."""
+    invoice = InvoiceFactory(amount=Decimal('50000.00'))
+    waiver = FeeWaiverFactory(
+        invoice=invoice,
+        waiver_type='partial',
+        amount=Decimal('20000.00'),
+    )
+    admin = UserFactory(user_type='admin')
+
+    FeeWaiverService.approve_waiver(waiver=waiver, approved_by=admin)
+
+    invoice.refresh_from_db()
+    assert invoice.balance == Decimal('30000.00')
+
+
+@pytest.mark.django_db
+def test_approve_percentage_waiver_calculates_correctly():
+    """Percentage waiver reduces balance by (invoice.amount * percentage / 100)."""
+    invoice = InvoiceFactory(amount=Decimal('100000.00'))
+    waiver = FeeWaiverFactory(
+        invoice=invoice,
+        waiver_type='percentage',
+        percentage=Decimal('25.00'),
+    )
+    admin = UserFactory(user_type='admin')
+
+    FeeWaiverService.approve_waiver(waiver=waiver, approved_by=admin)
+
+    invoice.refresh_from_db()
+    assert invoice.balance == Decimal('75000.00')
+
+
+@pytest.mark.django_db
+def test_approve_already_approved_raises_conflict():
+    """Approving an already-approved waiver raises WaiverAlreadyApproved."""
+    invoice = InvoiceFactory(amount=Decimal('50000.00'))
+    waiver = FeeWaiverFactory(invoice=invoice, waiver_type='full', is_approved=True)
+    admin = UserFactory(user_type='admin')
+
+    with pytest.raises(WaiverAlreadyApproved):
+        FeeWaiverService.approve_waiver(waiver=waiver, approved_by=admin)
+
+
+# ===========================================================================
+# FinanceReportService
+# ===========================================================================
+
+from finance.services import FinanceReportService
+
+
+@pytest.mark.django_db
+def test_summary_returns_correct_totals():
+    """Summary aggregates total collected, pending, and collection rate."""
+    invoice = InvoiceFactory(amount=Decimal('10000.00'))
+    PaymentFactory(
+        invoice=invoice,
+        student=invoice.student,
+        amount=Decimal('10000.00'),
+        status='completed',
+    )
+    # Reconcile the invoice so it reflects paid status
+    invoice.amount_paid = Decimal('10000.00')
+    invoice.save()
+
+    result = FinanceReportService.summary()
+
+    assert result['total_collected'] == float(Decimal('10000.00'))
+    assert result['total_invoices'] >= 1
+    assert 'collection_rate' in result
+    assert 'this_month' in result
+
+
+@pytest.mark.django_db
+def test_summary_handles_empty_database():
+    """Summary on empty DB returns zeros without crashing."""
+    result = FinanceReportService.summary()
+
+    assert result['total_collected'] == 0.0
+    assert result['total_invoices'] == 0
+    assert result['collection_rate'] == 0
+    assert result['this_month']['collected'] == 0.0
+
+
+@pytest.mark.django_db
+def test_payment_trends_returns_list():
+    """payment_trends returns a list (possibly empty)."""
+    result = FinanceReportService.payment_trends(days=30)
+
+    assert isinstance(result, list)

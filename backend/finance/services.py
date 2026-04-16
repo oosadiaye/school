@@ -4,10 +4,10 @@ from __future__ import annotations
 import datetime
 import uuid
 from decimal import Decimal
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
-from django.db import transaction
-from django.db.models import QuerySet
+from django.db import models, transaction
+from django.db.models import Count, QuerySet, Sum
 from django.utils import timezone
 
 from finance.exceptions import (
@@ -15,13 +15,17 @@ from finance.exceptions import (
     PaymentAlreadyVerified,
     PaymentInitiationFailed,
     PaymentVerificationFailed,
+    WaiverAlreadyApproved,
 )
 from finance.models import (
     FeeStructure,
+    FeeWaiver,
     InstallmentPayment,
     InstallmentPlan,
     Invoice,
     Payment,
+    Scholarship,
+    StudentScholarship,
 )
 from finance.payment_gateway import PaymentGateway
 from students.models import Student
@@ -344,3 +348,211 @@ class PaymentService:
             except Student.DoesNotExist:
                 return Payment.objects.none()
         return base_qs.all()
+
+
+class FeeWaiverService:
+    """Handles fee waiver approval and rejection."""
+
+    @staticmethod
+    @transaction.atomic
+    def approve_waiver(waiver: FeeWaiver, approved_by) -> FeeWaiver:
+        """Approve a fee waiver and adjust the linked invoice balance.
+
+        Raises:
+            WaiverAlreadyApproved: if the waiver is already approved.
+        """
+        if waiver.is_approved:
+            raise WaiverAlreadyApproved('Waiver has already been approved')
+
+        waiver.is_approved = True
+        waiver.approved_by = approved_by
+        waiver.approved_at = timezone.now()
+        waiver.save()
+
+        invoice = waiver.invoice
+        if waiver.waiver_type == 'full':
+            invoice.amount_paid = invoice.amount
+            invoice.status = 'waived'
+        elif waiver.waiver_type == 'partial':
+            invoice.amount_paid = invoice.amount_paid + waiver.amount
+        elif waiver.waiver_type == 'percentage':
+            reduction = invoice.amount * (waiver.percentage / Decimal('100'))
+            invoice.amount_paid = invoice.amount_paid + reduction
+
+        invoice.save()
+
+        # For full waivers, force the 'waived' status after save() recalculates
+        if waiver.waiver_type == 'full':
+            Invoice.objects.filter(pk=invoice.pk).update(status='waived')
+            invoice.refresh_from_db()
+
+        return waiver
+
+    @staticmethod
+    def reject_waiver(waiver: FeeWaiver, reason: str, by) -> FeeWaiver:
+        """Reject a waiver without affecting the invoice balance."""
+        waiver.is_approved = False
+        waiver.reason = reason
+        waiver.save()
+        return waiver
+
+
+class ScholarshipService:
+    """Handles scholarship assignment."""
+
+    @staticmethod
+    def assign_to_student(
+        student: Student,
+        scholarship: Scholarship,
+        session: str,
+        by=None,
+    ) -> StudentScholarship:
+        """Create a StudentScholarship record."""
+        return StudentScholarship.objects.create(
+            student=student,
+            scholarship=scholarship,
+            session=session,
+            start_date=datetime.date.today(),
+            is_active=True,
+        )
+
+
+class FinanceReportService:
+    """Aggregation-based finance reporting."""
+
+    @staticmethod
+    def summary() -> Dict[str, Any]:
+        """Comprehensive finance summary using ORM aggregations."""
+        today = datetime.date.today()
+        month_start = today.replace(day=1)
+
+        this_month = Payment.objects.filter(
+            payment_date__gte=month_start,
+            status='completed',
+        ).aggregate(
+            total=Sum('amount'),
+            count=Count('id'),
+        )
+
+        total_collected = (
+            Payment.objects.filter(status='completed')
+            .aggregate(Sum('amount'))['amount__sum'] or 0
+        )
+
+        invoice_stats = Invoice.objects.aggregate(
+            total_count=Count('id'),
+            paid_count=Count('id', filter=models.Q(status='paid')),
+            pending_sum=Sum(
+                'balance',
+                filter=models.Q(status__in=['pending', 'partially_paid']),
+            ),
+        )
+
+        overdue_invoices = Invoice.objects.filter(
+            due_date__lt=today,
+            status__in=['pending', 'partially_paid'],
+        ).count()
+
+        total_invoices = invoice_stats['total_count']
+        paid_invoices = invoice_stats['paid_count']
+
+        return {
+            'total_collected': float(total_collected),
+            'total_pending': float(invoice_stats['pending_sum'] or 0),
+            'total_invoices': total_invoices,
+            'paid_invoices': paid_invoices,
+            'overdue_invoices': overdue_invoices,
+            'collection_rate': (
+                round(paid_invoices / total_invoices * 100, 2)
+                if total_invoices > 0
+                else 0
+            ),
+            'this_month': {
+                'collected': float(this_month['total'] or 0),
+                'transactions': this_month['count'] or 0,
+            },
+        }
+
+    @staticmethod
+    def by_programme() -> List[Dict[str, Any]]:
+        """Finance breakdown by programme using ORM aggregations."""
+        programme_stats = (
+            Invoice.objects.filter(fee_structure__programme__isnull=False)
+            .values('fee_structure__programme__name')
+            .annotate(
+                total_invoices=Count('id'),
+                collected=Sum('amount_paid'),
+                pending=Sum('balance'),
+            )
+        )
+        return [
+            {
+                'programme': stat['fee_structure__programme__name'],
+                'total_invoices': stat['total_invoices'],
+                'collected': float(stat['collected'] or 0),
+                'pending': float(stat['pending'] or 0),
+            }
+            for stat in programme_stats
+        ]
+
+    @staticmethod
+    def by_level() -> List[Dict[str, Any]]:
+        """Finance breakdown by level using ORM aggregations."""
+        level_stats = (
+            Invoice.objects.filter(fee_structure__level__isnull=False)
+            .values('fee_structure__level')
+            .annotate(
+                total_invoices=Count('id'),
+                collected=Sum('amount_paid'),
+                pending=Sum('balance'),
+            )
+        )
+        return [
+            {
+                'level': stat['fee_structure__level'],
+                'total_invoices': stat['total_invoices'],
+                'collected': float(stat['collected'] or 0),
+                'pending': float(stat['pending'] or 0),
+            }
+            for stat in level_stats
+        ]
+
+    @staticmethod
+    def payment_trends(days: int = 30) -> List[Dict[str, Any]]:
+        """Payment trends over time using ORM aggregations."""
+        today = datetime.date.today()
+        start_date = today - datetime.timedelta(days=days)
+
+        from django.db.models.functions import TruncDate
+
+        payments = (
+            Payment.objects.filter(
+                payment_date__gte=start_date,
+                status='completed',
+            )
+            .annotate(day=TruncDate('payment_date'))
+            .values('day')
+            .annotate(total=Sum('amount'), count=Count('id'))
+            .order_by('day')
+        )
+        return [
+            {
+                'date': p['day'],
+                'amount': float(p['total']),
+                'count': p['count'],
+            }
+            for p in payments
+        ]
+
+    @staticmethod
+    def waivers_report() -> Dict[str, Any]:
+        """Fee waivers summary report."""
+        total_waived = (
+            FeeWaiver.objects.filter(is_approved=True)
+            .aggregate(total=Sum('amount'))['total'] or 0
+        )
+        return {
+            'total_waivers': FeeWaiver.objects.filter(is_approved=True).count(),
+            'total_amount_waived': float(total_waived),
+            'pending_waivers': FeeWaiver.objects.filter(is_approved=False).count(),
+        }

@@ -38,3 +38,9 @@ class PaymentAlreadyVerified(ConflictError):
     """Payment has already been verified and processed."""
 
     error_code = 'payment_already_verified'
+
+
+class WaiverAlreadyApproved(ConflictError):
+    """Fee waiver has already been approved."""
+
+    error_code = 'waiver_already_approved'

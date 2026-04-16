@@ -6,6 +6,7 @@ import factory
 from finance.models import (
     FeeStructure,
     FeeType,
+    FeeWaiver,
     InstallmentPlan,
     InstallmentPayment,
     Invoice,
@@ -76,3 +77,16 @@ class PaymentFactory(factory.django.DjangoModelFactory):
     payment_method = 'online'
     transaction_id = factory.Sequence(lambda n: f'TXN-TEST{n:08d}')
     status = 'completed'
+
+
+class FeeWaiverFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = FeeWaiver
+
+    student = factory.LazyAttribute(lambda o: o.invoice.student)
+    invoice = factory.SubFactory(InvoiceFactory)
+    waiver_type = 'full'
+    amount = Decimal('0.00')
+    percentage = Decimal('0.00')
+    reason = 'Test waiver'
+    is_approved = False
