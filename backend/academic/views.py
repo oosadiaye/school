@@ -15,6 +15,7 @@ from .serializers import (
     CourseRegistrationSerializer, AttendanceSerializer,
     ResultSerializer, ResultCreateSerializer, ExamSittingSerializer
 )
+from .services import RegistrationService
 
 
 class AcademicSessionViewSet(viewsets.ModelViewSet):
@@ -103,66 +104,38 @@ class CourseRegistrationViewSet(viewsets.ModelViewSet):
         student_id = request.data.get('student_id')
         semester_id = request.data.get('semester_id')
         course_ids = request.data.get('course_ids', [])
-        
+
         if not all([student_id, semester_id, course_ids]):
             return Response(
                 {'error': 'student_id, semester_id, and course_ids are required'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
-        
+
         try:
             semester = Semester.objects.select_related('session').get(id=semester_id)
-            if not semester.session.is_registration_open:
-                return Response(
-                    {'error': 'Course registration is closed for this semester'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
         except Semester.DoesNotExist:
             return Response({'error': 'Semester not found'}, status=404)
-        
-        existing = set(
-            CourseRegistration.objects.filter(
-                student_id=student_id,
-                semester_id=semester_id,
-                course_id__in=course_ids
-            ).values_list('course_id', flat=True)
-        )
-        
-        new_registrations = [
-            CourseRegistration(
-                student_id=student_id,
-                course_id=course_id,
-                semester_id=semester_id,
-                status='registered'
-            )
-            for course_id in course_ids
-            if course_id not in existing
-        ]
-        
-        CourseRegistration.objects.bulk_create(new_registrations, ignore_conflicts=True)
-        
-        return Response({
-            'message': f'{len(new_registrations)} courses registered successfully',
-            'registered_count': len(new_registrations)
-        })
+
+        student = Student.objects.get(id=student_id)
+        result = RegistrationService.register_courses_bulk(student, course_ids, semester)
+        return Response(result)
     
     @action(detail=False, methods=['get'])
     def my_courses(self, request):
         try:
             student = request.user.student_profile
-            semester_id = request.query_params.get('semester_id')
-            
-            queryset = CourseRegistration.objects.select_related(
-                'student__user', 'course', 'semester', 'course__programme'
-            ).filter(student=student)
-            if semester_id:
-                queryset = queryset.filter(semester_id=semester_id)
-            
-            queryset = self.paginate_queryset(queryset)
-            serializer = self.get_serializer(queryset, many=True)
-            return self.get_paginated_response(serializer.data)
         except Student.DoesNotExist:
             return Response({'error': 'Student profile not found'}, status=404)
+
+        semester_id = request.query_params.get('semester_id')
+        semester = None
+        if semester_id:
+            semester = Semester.objects.filter(id=semester_id).first()
+
+        queryset = RegistrationService.get_student_courses(student, semester=semester)
+        queryset = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(queryset, many=True)
+        return self.get_paginated_response(serializer.data)
 
 
 class AttendanceViewSet(viewsets.ModelViewSet):
