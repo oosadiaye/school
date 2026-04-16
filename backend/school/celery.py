@@ -1,6 +1,10 @@
 """Celery app configuration for TIMS."""
+import logging
 import os
+
 from celery import Celery
+
+logger = logging.getLogger(__name__)
 
 # Default settings module for 'celery' CLI command
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'school.settings.development')
@@ -16,5 +20,5 @@ app.autodiscover_tasks()
 
 @app.task(bind=True, ignore_result=True)
 def debug_task(self):
-    """Print task request — useful for debugging worker setup."""
-    print(f'Request: {self.request!r}')
+    """Log task request via Django logging pipeline (not bare stdout)."""
+    logger.debug('Request: %r', self.request)
