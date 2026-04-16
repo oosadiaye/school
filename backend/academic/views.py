@@ -2,8 +2,7 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
-from django.db.models import Sum, Avg, F, Count
-from django.db import transaction
+from django.db.models import Sum, Avg, F, Count  # noqa: F401 – used by generate_seating
 from students.models import Student
 from .models import (
     AcademicSession, Semester, Course, CourseAllocation,
@@ -15,7 +14,7 @@ from .serializers import (
     CourseRegistrationSerializer, AttendanceSerializer,
     ResultSerializer, ResultCreateSerializer, ExamSittingSerializer
 )
-from .services import RegistrationService
+from .services import RegistrationService, ResultService, SessionService, SemesterService
 
 
 class AcademicSessionViewSet(viewsets.ModelViewSet):
@@ -27,11 +26,10 @@ class AcademicSessionViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def current(self, request):
-        session = AcademicSession.objects.filter(is_current=True).first()
-        if session:
-            serializer = self.get_serializer(session)
-            return Response(serializer.data)
-        return Response({'error': 'No current session'}, status=404)
+        session = SessionService.get_current()
+        if not session:
+            return Response({'error': 'No current session'}, status=404)
+        return Response(self.get_serializer(session).data)
 
 
 class SemesterViewSet(viewsets.ModelViewSet):
@@ -43,11 +41,10 @@ class SemesterViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def active(self, request):
-        semester = Semester.objects.filter(is_active=True).first()
-        if semester:
-            serializer = self.get_serializer(semester)
-            return Response(serializer.data)
-        return Response({'error': 'No active semester'}, status=404)
+        semester = SemesterService.get_active()
+        if not semester:
+            return Response({'error': 'No active semester'}, status=404)
+        return Response(self.get_serializer(semester).data)
 
 
 class CourseViewSet(viewsets.ModelViewSet):
@@ -165,60 +162,37 @@ class ResultViewSet(viewsets.ModelViewSet):
     def my_results(self, request):
         try:
             student = request.user.student_profile
-            semester_id = request.query_params.get('semester_id')
-            
-            queryset = Result.objects.select_related(
-                'student__user', 'course', 'semester', 'entered_by'
-            ).filter(student=student)
-            if semester_id:
-                queryset = queryset.filter(semester_id=semester_id)
-            
-            queryset = self.paginate_queryset(queryset)
-            serializer = self.get_serializer(queryset, many=True)
-            return self.get_paginated_response(serializer.data)
         except Student.DoesNotExist:
             return Response({'error': 'Student profile not found'}, status=404)
+
+        semester_id = request.query_params.get('semester_id')
+        semester = Semester.objects.filter(id=semester_id).first() if semester_id else None
+        queryset = ResultService.get_student_results(student, semester=semester)
+        queryset = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(queryset, many=True)
+        return self.get_paginated_response(serializer.data)
     
     @action(detail=False, methods=['get'])
     def calculate_gpa(self, request):
-        from django.db.models import F, Case, When, FloatField
-        
         student_id = request.query_params.get('student_id')
         semester_id = request.query_params.get('semester_id')
-        
+
         if not student_id:
             return Response({'error': 'student_id is required'}, status=400)
-        
-        results = Result.objects.filter(student_id=student_id, grade_point__isnull=False, course__credit_units__isnull=False)
-        if semester_id:
-            results = results.filter(semester_id=semester_id)
-        
-        if not results.exists():
-            return Response({'gpa': 0.0, 'cgpa': 0.0})
-        
-        aggregated = results.annotate(
-            weighted_points=F('grade_point') * F('course__credit_units')
-        ).aggregate(
-            total_points=Sum('weighted_points'),
-            total_units=Sum('course__credit_units'),
-            results_count=Count('id')
-        )
-        
-        total_points = aggregated['total_points'] or 0
-        total_units = aggregated['total_units'] or 0
-        gpa = total_points / total_units if total_units > 0 else 0
-        
-        return Response({
-            'gpa': round(gpa, 2),
-            'total_credits': total_units,
-            'results_count': aggregated['results_count']
-        })
+
+        try:
+            student = Student.objects.get(id=student_id)
+        except Student.DoesNotExist:
+            return Response({'error': 'Student not found'}, status=404)
+
+        semester = Semester.objects.filter(id=semester_id).first() if semester_id else None
+        data = ResultService.calculate_gpa_cgpa(student, semester=semester)
+        return Response(data)
     
     @action(detail=True, methods=['post'])
     def publish(self, request, pk=None):
         result = self.get_object()
-        result.is_published = True
-        result.save()
+        ResultService.publish_result(result, by=request.user)
         return Response({'message': 'Result published successfully'})
 
 

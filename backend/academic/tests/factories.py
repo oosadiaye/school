@@ -8,6 +8,7 @@ from academic.models import (
     Course,
     CourseAllocation,
     CourseRegistration,
+    Result,
 )
 from accounts.tests.factories import UserFactory
 from students.tests.factories import ProgrammeFactory, StudentFactory
@@ -65,3 +66,16 @@ class CourseRegistrationFactory(factory.django.DjangoModelFactory):
     course = factory.SubFactory(CourseFactory)
     semester = factory.SubFactory(SemesterFactory)
     status = 'registered'
+
+
+class ResultFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = Result
+
+    student = factory.SubFactory(StudentFactory)
+    course = factory.SubFactory(CourseFactory)
+    semester = factory.SubFactory(SemesterFactory)
+    ca_score = 30.0
+    exam_score = 50.0
+    entered_by = factory.SubFactory(UserFactory, user_type='lecturer')
+    is_published = False

@@ -1,13 +1,19 @@
-"""Business logic for the academic app — course registration."""
+"""Business logic for the academic app."""
 from __future__ import annotations
 
 from typing import List, Optional
 
 from django.db import transaction
-from django.db.models import QuerySet
+from django.db.models import Count, F, QuerySet, Sum
 
-from academic.exceptions import CourseNotFound, RegistrationClosed
-from academic.models import Course, CourseRegistration
+from academic.exceptions import AlreadyPublished, CourseNotFound, RegistrationClosed
+from academic.models import (
+    AcademicSession,
+    Course,
+    CourseRegistration,
+    Result,
+    Semester,
+)
 
 
 class RegistrationService:
@@ -104,3 +110,93 @@ class RegistrationService:
             qs = qs.filter(semester=semester)
 
         return qs
+
+
+class ResultService:
+    """Handles result queries, GPA calculation, and publishing."""
+
+    @staticmethod
+    def calculate_gpa_cgpa(student, semester=None) -> dict:
+        """Calculate GPA (and optionally CGPA) for a student.
+
+        Replicates the aggregation logic from the former ``calculate_gpa`` view:
+        GPA = Sum(grade_point * credit_units) / Sum(credit_units)
+        """
+        results = Result.objects.filter(
+            student=student,
+            grade_point__isnull=False,
+            course__credit_units__isnull=False,
+        )
+
+        if semester is not None:
+            results = results.filter(semester=semester)
+
+        if not results.exists():
+            return {'gpa': 0.0, 'total_credits': 0, 'results_count': 0}
+
+        aggregated = results.annotate(
+            weighted_points=F('grade_point') * F('course__credit_units'),
+        ).aggregate(
+            total_points=Sum('weighted_points'),
+            total_units=Sum('course__credit_units'),
+            results_count=Count('id'),
+        )
+
+        total_points = aggregated['total_points'] or 0
+        total_units = aggregated['total_units'] or 0
+        gpa = total_points / total_units if total_units > 0 else 0
+
+        return {
+            'gpa': round(gpa, 2),
+            'total_credits': total_units,
+            'results_count': aggregated['results_count'],
+        }
+
+    @staticmethod
+    def publish_result(result: Result, by) -> Result:
+        """Publish a result. Raises AlreadyPublished if already published."""
+        if result.is_published:
+            raise AlreadyPublished('Result has already been published.')
+
+        result.is_published = True
+        result.save(update_fields=['is_published', 'updated_at'])
+        return result
+
+    @staticmethod
+    def get_student_results(student, semester=None) -> QuerySet[Result]:
+        """Return a student's results, optionally filtered by semester."""
+        qs = Result.objects.select_related(
+            'student__user', 'course', 'semester', 'entered_by',
+        ).filter(student=student)
+
+        if semester is not None:
+            qs = qs.filter(semester=semester)
+
+        return qs
+
+
+class SessionService:
+    """Handles academic session activation and lookup."""
+
+    @staticmethod
+    def activate_session(session: AcademicSession, by) -> AcademicSession:
+        """Activate a session, deactivating all others atomically."""
+        with transaction.atomic():
+            AcademicSession.objects.filter(is_current=True).update(is_current=False)
+            session.is_current = True
+            session.save(update_fields=['is_current', 'updated_at'])
+        return session
+
+    @staticmethod
+    def get_current() -> AcademicSession | None:
+        """Return the currently active academic session, or None."""
+        return AcademicSession.objects.filter(is_current=True).first()
+
+
+class SemesterService:
+    """Handles semester lookup."""
+
+    @staticmethod
+    def get_active() -> Semester | None:
+        """Return the currently active semester, or None."""
+        return Semester.objects.filter(is_active=True).first()

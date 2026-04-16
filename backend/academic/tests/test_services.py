@@ -1,13 +1,20 @@
-"""Tests for academic.services — RegistrationService."""
+"""Tests for academic.services — RegistrationService, ResultService,
+SessionService, SemesterService."""
 import pytest
-from academic.exceptions import CourseNotFound, RegistrationClosed
-from academic.models import CourseRegistration
-from academic.services import RegistrationService
+from academic.exceptions import AlreadyPublished, CourseNotFound, RegistrationClosed
+from academic.models import AcademicSession, CourseRegistration, Result
+from academic.services import (
+    RegistrationService,
+    ResultService,
+    SemesterService,
+    SessionService,
+)
 from academic.tests.factories import (
     AcademicSessionFactory,
     CourseAllocationFactory,
     CourseFactory,
     CourseRegistrationFactory,
+    ResultFactory,
     SemesterFactory,
 )
 from students.tests.factories import StudentFactory
@@ -142,3 +149,145 @@ class TestGetStudentCourses:
         student = StudentFactory()
         qs = RegistrationService.get_student_courses(student)
         assert qs.count() == 0
+
+
+# ---------------------------------------------------------------------------
+# ResultService tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestCalculateGpaCgpa:
+    """Tests for ResultService.calculate_gpa_cgpa."""
+
+    def test_single_result(self):
+        """A single result should return the grade_point as GPA."""
+        student = StudentFactory()
+        semester = SemesterFactory()
+        course = CourseFactory(credit_units=3)
+        # ca_score=30, exam_score=40 → total=70 → grade A → grade_point 4.0
+        ResultFactory(
+            student=student, course=course, semester=semester,
+            ca_score=30.0, exam_score=40.0,
+        )
+
+        data = ResultService.calculate_gpa_cgpa(student, semester=semester)
+
+        assert data['gpa'] == 4.0
+        assert data['total_credits'] == 3
+
+    def test_mixed_grades(self):
+        """Two results with different grades: weighted average."""
+        student = StudentFactory()
+        semester = SemesterFactory()
+        programme = CourseFactory._meta.model.objects.none()  # unused
+        # Course A: 3 credits, grade A (4.0) → ca=30 exam=40 total=70
+        course_a = CourseFactory(credit_units=3)
+        ResultFactory(
+            student=student, course=course_a, semester=semester,
+            ca_score=30.0, exam_score=40.0,
+        )
+        # Course B: 2 credits, grade C (3.0) → ca=20 exam=30 total=50
+        course_b = CourseFactory(credit_units=2)
+        ResultFactory(
+            student=student, course=course_b, semester=semester,
+            ca_score=20.0, exam_score=30.0,
+        )
+
+        data = ResultService.calculate_gpa_cgpa(student, semester=semester)
+
+        # GPA = (4.0*3 + 3.0*2) / (3+2) = 18/5 = 3.6
+        assert data['gpa'] == 3.6
+        assert data['total_credits'] == 5
+
+    def test_no_results_returns_zero(self):
+        """Student with no results → gpa=0."""
+        student = StudentFactory()
+
+        data = ResultService.calculate_gpa_cgpa(student)
+
+        assert data['gpa'] == 0.0
+        assert data['total_credits'] == 0
+
+
+@pytest.mark.django_db
+class TestPublishResult:
+    """Tests for ResultService.publish_result."""
+
+    def test_publishes_unpublished_result(self):
+        """Should set is_published to True."""
+        result = ResultFactory(is_published=False)
+
+        updated = ResultService.publish_result(result, by=result.entered_by)
+
+        assert updated.is_published is True
+        result.refresh_from_db()
+        assert result.is_published is True
+
+    def test_raises_if_already_published(self):
+        """Should raise AlreadyPublished for a published result."""
+        result = ResultFactory(is_published=True)
+
+        with pytest.raises(AlreadyPublished):
+            ResultService.publish_result(result, by=result.entered_by)
+
+
+# ---------------------------------------------------------------------------
+# SessionService tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestSessionService:
+    """Tests for SessionService."""
+
+    def test_activate_session_deactivates_previous(self):
+        """Activating a session should deactivate all others."""
+        session1 = AcademicSessionFactory(is_current=True)
+        session2 = AcademicSessionFactory(is_current=False)
+
+        activated = SessionService.activate_session(session2, by=None)
+
+        assert activated.is_current is True
+        session1.refresh_from_db()
+        assert session1.is_current is False
+
+    def test_get_current_returns_active_session(self):
+        """get_current should return the session with is_current=True."""
+        session = AcademicSessionFactory(is_current=True)
+
+        current = SessionService.get_current()
+
+        assert current is not None
+        assert current.id == session.id
+
+    def test_get_current_returns_none_when_no_active(self):
+        """get_current returns None when no session is current."""
+        AcademicSessionFactory(is_current=False)
+
+        assert SessionService.get_current() is None
+
+
+# ---------------------------------------------------------------------------
+# SemesterService tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestSemesterService:
+    """Tests for SemesterService."""
+
+    def test_get_active_returns_active_semester(self):
+        """Should return the semester with is_active=True."""
+        semester = SemesterFactory(is_active=True)
+
+        active = SemesterService.get_active()
+
+        assert active is not None
+        assert active.id == semester.id
+
+    def test_get_active_returns_none_when_no_active(self):
+        """Returns None when no semester is active."""
+        SemesterFactory(is_active=False)
+
+        assert SemesterService.get_active() is None
