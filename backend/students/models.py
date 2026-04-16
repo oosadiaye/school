@@ -102,6 +102,11 @@ class Student(models.Model):
     jamb_number = models.CharField(max_length=20, blank=True, db_index=True)
     admission_year = models.PositiveIntegerField(db_index=True)
     expected_graduation_year = models.PositiveIntegerField()
+    gender = models.CharField(
+        max_length=10,
+        choices=[('male', 'Male'), ('female', 'Female')],
+        blank=True,
+    )
     date_of_birth = models.DateField(null=True, blank=True)
     place_of_birth = models.CharField(max_length=200, blank=True)
     state_of_origin = models.CharField(max_length=50, blank=True, db_index=True)
