@@ -1,3 +1,5 @@
+from datetime import date
+
 from rest_framework import serializers
 from .models import Author, Category, Book, LibraryMember, BookLoan, Reservation
 
@@ -35,11 +37,16 @@ class LibraryMemberSerializer(serializers.ModelSerializer):
 class BookLoanSerializer(serializers.ModelSerializer):
     book_title = serializers.CharField(source='book.title', read_only=True)
     member_name = serializers.CharField(source='member.user.get_full_name', read_only=True)
-    
+
     class Meta:
         model = BookLoan
         fields = ['id', 'book', 'book_title', 'member', 'member_name', 'borrow_date',
                   'due_date', 'return_date', 'status', 'fine_amount', 'created_at']
+
+    def validate_due_date(self, value):
+        if value is not None and value <= date.today():
+            raise serializers.ValidationError('Due date must be in the future.')
+        return value
 
 class ReservationSerializer(serializers.ModelSerializer):
     book_title = serializers.CharField(source='book.title', read_only=True)

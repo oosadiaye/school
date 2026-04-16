@@ -25,6 +25,15 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
         model = LeaveRequest
         fields = ['id', 'employee', 'employee_name', 'leave_type', 'leave_type_name', 'start_date', 'end_date', 'days', 'reason', 'status']
 
+    def validate(self, data):
+        start = data.get('start_date')
+        end = data.get('end_date')
+        if start and end and end <= start:
+            raise serializers.ValidationError({
+                'end_date': 'End date must be after start date.'
+            })
+        return data
+
 class AttendanceSerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source='employee.user.get_full_name', read_only=True)
     class Meta:

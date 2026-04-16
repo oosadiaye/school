@@ -1,11 +1,22 @@
+from django.core.validators import RegexValidator
 from rest_framework import serializers
 from .models import User
 
+PHONE_VALIDATOR = RegexValidator(
+    r'^\+?[0-9]{10,15}$',
+    'Invalid phone number format. Expected 10-15 digits, optionally prefixed with +.',
+)
+
 
 class UserSerializer(serializers.ModelSerializer):
+    phone = serializers.CharField(
+        required=False, allow_blank=True,
+        validators=[PHONE_VALIDATOR],
+    )
+
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'first_name', 'last_name', 
+        fields = ['id', 'username', 'email', 'first_name', 'last_name',
                   'user_type', 'phone', 'address', 'photo', 'is_active',
                   'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -14,7 +25,11 @@ class UserSerializer(serializers.ModelSerializer):
 class UserCreateSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
     password_confirm = serializers.CharField(write_only=True)
-    
+    phone = serializers.CharField(
+        required=False, allow_blank=True,
+        validators=[PHONE_VALIDATOR],
+    )
+
     class Meta:
         model = User
         fields = ['username', 'email', 'password', 'password_confirm',

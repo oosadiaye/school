@@ -19,6 +19,18 @@ class HostelAssignmentSerializer(serializers.ModelSerializer):
         model = HostelAssignment
         fields = ['id', 'student', 'student_name', 'room', 'room_name', 'session', 'bed_number', 'status', 'check_in_date', 'check_out_date']
 
+    def validate(self, data):
+        student = data.get('student')
+        room = data.get('room')
+        if student and room:
+            hostel_type = room.hostel.hostel_type
+            student_gender = getattr(student, 'gender', '')
+            if hostel_type != 'mixed' and student_gender and student_gender != hostel_type:
+                raise serializers.ValidationError({
+                    'room': f'Student gender ({student_gender}) does not match hostel type ({hostel_type}).'
+                })
+        return data
+
 class HostelFeeSerializer(serializers.ModelSerializer):
     hostel_name = serializers.CharField(source='hostel.name', read_only=True)
     class Meta:

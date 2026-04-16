@@ -1,3 +1,5 @@
+from datetime import date
+
 from rest_framework import serializers
 from .models import Faculty, Department, Programme, Student
 from accounts.serializers import UserSerializer
@@ -66,7 +68,18 @@ class StudentCreateSerializer(serializers.ModelSerializer):
             'date_of_birth', 'place_of_birth', 'state_of_origin', 'lga',
             'guardian_name', 'guardian_phone', 'guardian_address', 'guardian_relationship'
         ]
-    
+
+    def validate_date_of_birth(self, value):
+        if value is None:
+            return value
+        today = date.today()
+        if value >= today:
+            raise serializers.ValidationError('Date of birth must be in the past.')
+        age = (today - value).days / 365.25
+        if age < 10:
+            raise serializers.ValidationError('Student must be at least 10 years old.')
+        return value
+
     def create(self, validated_data):
         from django.contrib.auth import get_user_model
         User = get_user_model()

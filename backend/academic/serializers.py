@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from django.core.validators import MinValueValidator, MaxValueValidator
 from .models import (
     AcademicSession, Semester, Course, CourseAllocation,
     CourseRegistration, Attendance, Result, ExamSitting
@@ -58,13 +59,18 @@ class CourseRegistrationSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='course.name', read_only=True)
     course_code = serializers.CharField(source='course.code', read_only=True)
     semester_name = serializers.CharField(source='semester.name', read_only=True)
-    
+
     class Meta:
         model = CourseRegistration
-        fields = ['id', 'student', 'student_name', 'student_matric', 'course', 
+        fields = ['id', 'student', 'student_name', 'student_matric', 'course',
                   'course_name', 'course_code', 'semester', 'semester_name',
                   'registration_date', 'status']
         read_only_fields = ['id', 'registration_date']
+
+    def validate_semester(self, value):
+        if not value.is_active:
+            raise serializers.ValidationError('Course registration is only allowed in an active semester.')
+        return value
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
@@ -99,9 +105,25 @@ class ResultSerializer(serializers.ModelSerializer):
 
 
 class ResultCreateSerializer(serializers.ModelSerializer):
+    ca_score = serializers.FloatField(
+        validators=[MinValueValidator(0), MaxValueValidator(40)],
+    )
+    exam_score = serializers.FloatField(
+        validators=[MinValueValidator(0), MaxValueValidator(60)],
+    )
+
     class Meta:
         model = Result
         fields = ['student', 'course', 'semester', 'ca_score', 'exam_score', 'remark']
+
+    def validate(self, data):
+        ca = data.get('ca_score', 0)
+        exam = data.get('exam_score', 0)
+        if ca + exam > 100:
+            raise serializers.ValidationError({
+                'exam_score': 'CA + Exam scores cannot exceed 100.'
+            })
+        return data
 
 
 class ExamSittingSerializer(serializers.ModelSerializer):
