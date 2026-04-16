@@ -10,3 +10,5 @@ redis>=5.0
 django-redis>=5.4
 requests>=2.31
 gunicorn>=21.2
+Pillow>=10.2
+stripe>=7.0
