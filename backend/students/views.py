@@ -6,8 +6,11 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from .models import Faculty, Department, Programme, Student
 from .serializers import (
-    FacultySerializer, DepartmentSerializer, 
+    FacultySerializer, DepartmentSerializer,
     ProgrammeSerializer, StudentSerializer, StudentCreateSerializer
+)
+from .services import (
+    StudentService, FacultyService, DepartmentService, ProgrammeService,
 )
 
 
@@ -20,6 +23,9 @@ class FacultyViewSet(viewsets.ModelViewSet):
     filterset_fields = ['name', 'code']
     pagination_class = PageNumberPagination
 
+    def perform_destroy(self, instance):
+        FacultyService.safe_delete(instance, by=self.request.user)
+
 
 class DepartmentViewSet(viewsets.ModelViewSet):
     queryset = Department.objects.select_related('faculty').all()
@@ -29,6 +35,9 @@ class DepartmentViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'code']
     ordering_fields = ['name', 'code', 'created_at']
     pagination_class = PageNumberPagination
+
+    def perform_destroy(self, instance):
+        DepartmentService.safe_delete(instance, by=self.request.user)
 
 
 class ProgrammeViewSet(viewsets.ModelViewSet):
@@ -40,6 +49,9 @@ class ProgrammeViewSet(viewsets.ModelViewSet):
     ordering_fields = ['name', 'code', 'created_at']
     pagination_class = PageNumberPagination
 
+    def perform_destroy(self, instance):
+        ProgrammeService.safe_delete(instance, by=self.request.user)
+
 
 class StudentViewSet(viewsets.ModelViewSet):
     queryset = Student.objects.select_related('user', 'programme__department__faculty').all()
@@ -48,39 +60,24 @@ class StudentViewSet(viewsets.ModelViewSet):
     search_fields = ['matric_number', 'user__first_name', 'user__last_name', 'user__email', 'jamb_number']
     ordering_fields = ['matric_number', 'admission_year', 'created_at']
     pagination_class = PageNumberPagination
-    
+
     def get_serializer_class(self):
         if self.action == 'create':
             return StudentCreateSerializer
         return StudentSerializer
-    
+
     def get_queryset(self):
-        user = self.request.user
-        if user.user_type == 'student':
-            return Student.objects.filter(user=user)
-        return super().get_queryset()
-    
+        return StudentService.filter_for_user(self.request.user)
+
     @action(detail=False, methods=['get'], permission_classes=[permissions.IsAuthenticated])
     def my_profile(self, request):
-        try:
-            student = Student.objects.get(user=request.user)
-            serializer = StudentSerializer(student)
-            return Response(serializer.data)
-        except Student.DoesNotExist:
-            return Response(
-                {'error': 'Student profile not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-    
+        student = StudentService.get_profile_for_user(request.user)
+        serializer = StudentSerializer(student)
+        return Response(serializer.data)
+
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def update_status(self, request, pk=None):
         student = self.get_object()
         new_status = request.data.get('status')
-        if new_status not in dict(Student.STATUS_CHOICES):
-            return Response(
-                {'error': 'Invalid status'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        student.status = new_status
-        student.save()
-        return Response(StudentSerializer(student).data)
+        updated = StudentService.update_status(student, new_status, by=request.user)
+        return Response(StudentSerializer(updated).data)
