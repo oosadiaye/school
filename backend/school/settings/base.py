@@ -33,8 +33,8 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -116,6 +116,9 @@ REST_FRAMEWORK = {
 }
 
 # JWT
+# Note: JWT signing key is intentionally coupled to Django SECRET_KEY.
+# Rotating SECRET_KEY will invalidate all active JWT tokens (forced logout).
+# To rotate independently, change to: config('JWT_SECRET_KEY', default=SECRET_KEY)
 JWT_SECRET_KEY = SECRET_KEY
 JWT_ACCESS_TOKEN_LIFETIME = timedelta(
     hours=config('JWT_ACCESS_TOKEN_HOURS', default=2, cast=int))
