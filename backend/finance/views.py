@@ -568,6 +568,6 @@ class FinanceReportViewSet(viewsets.ViewSet):
         
         return Response({
             'total_waivers': FeeWaiver.objects.filter(is_approved=True).count(),
-            'total_amount_waived': float(total_waivered),
+            'total_amount_waived': float(total_waived),
             'pending_waivers': FeeWaiver.objects.filter(is_approved=False).count()
         })
