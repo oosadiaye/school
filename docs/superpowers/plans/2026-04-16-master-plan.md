@@ -24,7 +24,7 @@ The spec covers ~250 file changes across 10 logical phases. The `writing-plans` 
 | 1 | Foundation & Bug Fixes | `2026-04-16-phase-01-foundation.md` | ✅ Complete | ~20 |
 | 2 | Backend Service Layer | `2026-04-16-phase-02-services.md` | ✅ Complete | ~18 |
 | 3 | Backend Signals & Tasks | `2026-04-17-phase-03-signals-tasks.md` | ✅ Complete | ~10 |
-| 4 | Backend Admin & Tests | `2026-04-16-phase-04-admin-tests.md` | ⏳ After Phase 3 | ~30 |
+| 4 | Backend Admin & Tests | `2026-04-17-phase-04-admin-tests.md` | 🔄 In Progress | ~8 |
 | 5 | Frontend TypeScript Migration | `2026-04-16-phase-05-typescript.md` | ⏳ After Phase 4 | ~25 |
 | 6 | Frontend State & API Rewrite | `2026-04-16-phase-06-stores-api.md` | ⏳ After Phase 5 | ~22 |
 | 7 | Frontend Page Completion | `2026-04-16-phase-07-pages.md` | ⏳ After Phase 6 | ~40 |
