@@ -4,6 +4,7 @@ Shared across all environments. Inherit from here.
 """
 from pathlib import Path
 from datetime import timedelta
+from celery.schedules import crontab
 from decouple import config, Csv
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -137,6 +138,33 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
+
+CELERY_BEAT_SCHEDULE = {
+    'check-overdue-invoices': {
+        'task': 'finance.tasks.check_overdue_invoices',
+        'schedule': crontab(hour=8, minute=0),
+    },
+    'send-payment-reminders': {
+        'task': 'finance.tasks.send_payment_reminders',
+        'schedule': crontab(hour=9, minute=0, day_of_week='mon'),
+    },
+    'check-overdue-books': {
+        'task': 'library.tasks.check_overdue_books',
+        'schedule': crontab(hour=7, minute=0),
+    },
+    'expire-reservations': {
+        'task': 'library.tasks.expire_old_reservations',
+        'schedule': crontab(minute=0, hour='*/6'),
+    },
+    'accreditation-expiry-alerts': {
+        'task': 'nuc.tasks.check_expiring_accreditations',
+        'schedule': crontab(hour=8, minute=0, day_of_week='mon'),
+    },
+    'daily-attendance-summary': {
+        'task': 'hr.tasks.daily_attendance_summary',
+        'schedule': crontab(hour=18, minute=0, day_of_week='1-5'),
+    },
+}
 
 # Email — defaults for dev, overridden in production
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
