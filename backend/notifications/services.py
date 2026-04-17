@@ -129,16 +129,19 @@ class EmailService:
 
     @staticmethod
     def queue_email(to: str, template_name: str, context: dict) -> None:
-        """Queue an email for sending (shell — logs only for now).
+        """Queue an email for async sending via Celery.
 
-        Phase 3 will replace this with a Celery task.
+        Renders the template synchronously, then dispatches the send
+        to a background worker so the caller never blocks on SMTP I/O.
         """
         try:
             subject, body = EmailService.render_template(template_name, context)
         except TemplateNotFound:
             logger.warning("Email template '%s' not found; email to %s not queued.", template_name, to)
             return
-        logger.info("EMAIL QUEUED to=%s subject='%s' (shell — not actually sent)", to, subject)
+        from notifications.tasks import send_email_task
+
+        send_email_task.delay(to, subject, body)
 
 
 class SMSService:
@@ -162,16 +165,19 @@ class SMSService:
 
     @staticmethod
     def queue_sms(to_phone: str, template_name: str, context: dict) -> None:
-        """Queue an SMS for sending (shell — logs only for now).
+        """Queue an SMS for async sending via Celery.
 
-        Phase 3 will replace this with a Celery task.
+        Renders the template synchronously, then dispatches the send
+        to a background worker.
         """
         try:
             body = SMSService.render_template(template_name, context)
         except TemplateNotFound:
             logger.warning("SMS template '%s' not found; SMS to %s not queued.", template_name, to_phone)
             return
-        logger.info("SMS QUEUED to=%s body='%s' (shell — not actually sent)", to_phone, body)
+        from notifications.tasks import send_sms_task
+
+        send_sms_task.delay(to_phone, body)
 
 
 class AnnouncementService:
